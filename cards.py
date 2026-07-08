@@ -14,7 +14,6 @@ class Card:
     value: int
 
 class CardDeck:
-    # what is the goal structure of this? i think one long list with all the card objects in it.
     
     def __init__(self):
         self.cards = []
