@@ -1,4 +1,26 @@
-WIZARD, NARR = 14, 0
+from cards import WIZARD, NARR
+
+def legal_cards(hand, trick_plays):
+    if not trick_plays:
+        return list(hand)                    # Anspieler: alles erlaubt
+
+    if trick_plays[0][1].value == WIZARD:    # Zauberer ANGESPIELT → keine Bedienpflicht
+        return list(hand)
+
+    lead_color = None                        # sonst: erste echte Farbe = Anspielfarbe
+    for _, card in trick_plays:
+        if card.value not in (WIZARD, NARR):
+            lead_color = card.color
+            break
+    if lead_color is None:                   # nur Narren bisher → alles erlaubt
+        return list(hand)
+
+    follow = [c for c in hand if c.color == lead_color]
+    if not follow:                           # kann Farbe nicht bedienen → alles erlaubt
+        return list(hand)
+
+    return [c for c in hand                  # Bedienpflicht — aber Z/N immer erlaubt
+            if c.color == lead_color or c.value in (WIZARD, NARR)]
 
 def card_rank(card, trump, lead_color):
     if card.value == WIZARD:            return 3000
