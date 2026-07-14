@@ -1,21 +1,23 @@
 from game import Game
-from player import Player
+from player import Player, RandomAgent
+
 
 def start_game():
     game = Game()
     
-    player_num = 3
+    agent = RandomAgent()
 
-    p = Player("peter", 0)
+
+
+    p = Player("justus", 0, agent)
     game.add_player(p)
-    p = Player("bob", 1)
+    p = Player("peter", 1, agent)
     game.add_player(p)
-    p = Player("hank", 2)
+    p = Player("bob", 2, agent)
     game.add_player(p)
 
     game.start()
-
-
+    
 
 if __name__== "__main__":
     start_game()
