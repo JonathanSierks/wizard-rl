@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from cards import CardDeck, Card
 from tricks import Trick, legal_cards, resolve_winner
 import random
+from observations import BidObservation, PlayObservation
+
 
 NUMBER_OF_ROUNDS = 20
 
@@ -29,26 +31,7 @@ def calculate_points(players):
             player.points += abs(wanted - achieved) * -10
 
 
-@dataclass(frozen=True)
-class BidObservation:
-    hand: list[Card]
-    trump: str | None
-    bids_and_wins: list[tuple[int, int]]   # rotiert, Index 0 = ich; (gebot, stiche)
-    n_players_bid_before_me: int           # wie viele vor mir schon geboten haben
-    round_nr: int
-
-@dataclass(frozen=True)
-class PlayObservation:
-    hand: list[Card]
-    trump: str | None
-    trick_so_far: list[tuple[int, Card]]   # geordnet; Spieler relativ zu mir kodiert
-    played_cards: list[Card]               # Historie der ganzen Runde (Markov)
-    bids_and_wins: list[tuple[int, int]]   # rotiert, Index 0 = ich
-    round_nr: int
-
-
 class Game:
-    
     def _rotate_to(self, my_id):                 # Spieler in MEINER Sicht: Index 0 = ich
         n = len(self.players)
         return [self.players[(my_id + k) % n] for k in range(n)]
@@ -148,7 +131,7 @@ class Game:
                         trick_so_far=trick_so_far,
                         played_cards=list(played_cards),
                         bids_and_wins=bids_and_wins,
-                        round_nr=round_nr,
+                        round_nr=round_nr
                     )
                     #print(f"Play obs: {obs}")
 
