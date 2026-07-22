@@ -4,6 +4,7 @@ from dataclasses import dataclass
 NUM_CARDS = 60
 COLORS = ["green", "red", "blue", "yellow"]
 VALUES = range(0,15)
+TRUMP = ["green", "red", "blue", "yellow", "none"]
 
 WIZARD = 14
 NARR = 0
@@ -24,6 +25,11 @@ class CardDeck:
             for value in VALUES:        
                 self.cards.append(Card(color, value))
         shuffle(self.cards)
+
+    def initialize_ordered_deck(self):
+        for color in COLORS:
+            for value in VALUES:        
+                self.cards.append(Card(color, value))
 
     def draw_card(self):
         return self.cards.pop()
