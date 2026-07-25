@@ -20,16 +20,14 @@ def determine_trump(deck, round_nr):
         return potential_trump_card.color
 
 def calculate_points(players):
+    round_points = {}
     for player in players:
-        wanted = player.called_tricks
-        achieved = player.won_tricks
-
-        # was ist wenn der agent so schlecht ist, dass er negativ punkte erreicht?
-        if wanted == achieved:
-            player.points += 20 + wanted*10
-        else:
-            player.points += abs(wanted - achieved) * -10
-
+        pts = (20 + player.called_tricks * 10
+               if player.called_tricks == player.won_tricks
+               else abs(player.called_tricks - player.won_tricks) * -10)
+        player.points += pts
+        round_points[player.id] = pts
+    return round_points
 
 class Game:
     def _rotate_to(self, my_id):                 # Spieler in MEINER Sicht: Index 0 = ich
@@ -115,7 +113,8 @@ class Game:
             current_lead = first_player          # erster Stich: Anspieler = erster Bieter
             # n = len(self.players)  ist aus dem Bid-Block schon gesetzt
 
-            for trick_nr in range(round_nr):
+            # iterate over the tricks of a round
+            for _ in range(round_nr):
                 trick = Trick(trump, current_lead)
                 order = [(current_lead + i) % n for i in range(n)]    # Spielreihenfolge dieses Stichs
 
@@ -157,10 +156,14 @@ class Game:
                 "Nach der Runde sind noch Karten übrig"
 
             # 4) count points, write points
-            calculate_points(self.players)
             
+            #after 1 full round: calculate points and calculate rewards backwards
+            round_points = calculate_points(self.players)
+            for p in self.players:
+                p.observe_reward(round_points[p.id]) 
             #print(f"Nach Runde {round_nr} ist das Standing:")
             #for p in self.players:
             #    print(f"Spieler {p.id} hat {p.points}")
+            
     
     # 5) determine GAME WINNER

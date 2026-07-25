@@ -45,9 +45,10 @@ def encode(obs) -> np.ndarray:
 
 
 class RLAgent:
-    def __init__(self, net):
-        self.net = net
-        self.buffer = []
+    def __init__(self, net, gamma=0.95):
+        self.net, self.gamma = net, gamma
+        self.pending = []      # Transitions DIESER Runde
+        self.buffer  = []      # fertige Transitions mit G
 
     def choose_bid(self, observation, valid_bids):
         enc = encode(observation)
@@ -63,7 +64,7 @@ class RLAgent:
         dist = torch.distributions.Categorical(logits=bid_logits)   # Softmax passiert HIER
         action = int(dist.sample())
 
-        self.buffer.append((enc, action, mask.numpy(), "bid"))
+        self.pending.append((enc, action, mask.numpy(), "bid"))
         return action                               # Index == Gebot
     
     def choose_card(self, observation, legal_cards: list[Card]):
@@ -73,7 +74,6 @@ class RLAgent:
         with torch.no_grad():                       # Inference — kein Gradient nötig
             _, play_logits = self.net(x)             # net(x), nicht net.forward(x)
 
-        mask = torch.zeros(play_logits.shape[0], dtype=torch.bool)
         mask = torch.from_numpy(multi_hot(legal_cards)).bool()
         play_logits = play_logits.masked_fill(~mask, float('-inf'))
 
@@ -81,11 +81,19 @@ class RLAgent:
         
         idx = int(dist.sample())
 
-        self.buffer.append((enc, idx, mask.numpy(), "play"))
+        self.pending.append((enc, idx, mask.numpy(), "play"))
         return Card(color=COLORS[idx // 15], value=idx % 15) 
 
+    def observe_reward(self, reward):
+        n = len(self.pending)
+        for t, (enc, action, mask, head) in enumerate(self.pending):
+            G = (self.gamma ** (n - 1 - t)) * reward     # rückwärts diskontiert über die round
+            self.buffer.append((enc, action, mask, head, G))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
+        self.pending = []
+
     def drain_buffer(self):
-        pass
+        batch, self.buffer = self.buffer, []
+        return batch
 
 
 class RandomAgent:
@@ -94,10 +102,13 @@ class RandomAgent:
 
     def choose_card(self, observation, legal_cards: list[Card]):
         return random.choice(legal_cards)
+    
+    def observe_reward(self, reward):
+        pass
 
 
 class Player:
-    def __init__(self, name, id, agent):
+    def __init__(self, name, id, agent=None):
         self.agent = agent
         self.name = name
         self.id = id
@@ -117,3 +128,6 @@ class Player:
         card = self.agent.choose_card(observation, legal_cards)
         self.hand.remove(card)
         return card
+    
+    def observe_reward(self, reward):
+        self.agent.observe_reward(reward)
