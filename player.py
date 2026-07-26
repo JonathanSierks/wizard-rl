@@ -50,7 +50,7 @@ class RLAgent:
         self.greedy = greedy
         self.pending = []
         self.buffer = []
-        self.gamma = 0.95
+        self.gamma = 1.0        # we choose NOT to to discount reward for actions further back in time
 
     def choose_bid(self, observation, valid_bids):
         enc = encode(observation)
@@ -93,10 +93,11 @@ class RLAgent:
             self.pending.append((enc, idx, mask.numpy(), "play"))
         return Card(color=COLORS[idx // 15], value=idx % 15) 
 
+    # calculate reward back over all actions of 1 round to obtain G's
     def observe_reward(self, reward):
         n = len(self.pending)
         for t, (enc, action, mask, head) in enumerate(self.pending):
-            G = (self.gamma ** (n - 1 - t)) * reward     # rückwärts diskontiert über die round
+            G = (self.gamma ** (n - 1 - t)) * reward     # rückwärts diskontiert für jeweilige action aus pending
             self.buffer.append((enc, action, mask, head, G))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
         self.pending = []
 
