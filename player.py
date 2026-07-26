@@ -45,10 +45,12 @@ def encode(obs) -> np.ndarray:
 
 
 class RLAgent:
-    def __init__(self, net, gamma=0.95):
-        self.net, self.gamma = net, gamma
-        self.pending = []      # Transitions DIESER Runde
-        self.buffer  = []      # fertige Transitions mit G
+    def __init__(self, net, greedy=False):
+        self.net = net
+        self.greedy = greedy
+        self.pending = []
+        self.buffer = []
+        self.gamma = 0.95
 
     def choose_bid(self, observation, valid_bids):
         enc = encode(observation)
@@ -61,11 +63,15 @@ class RLAgent:
         mask[valid_bids] = True                     # valid_bids sind direkt die Indizes
         bid_logits = bid_logits.masked_fill(~mask, float('-inf'))
 
-        dist = torch.distributions.Categorical(logits=bid_logits)   # Softmax passiert HIER
-        action = int(dist.sample())
+        dist = torch.distributions.Categorical(logits=bid_logits)
+        if self.greedy:
+            idx = int(bid_logits.argmax())
+        else:
+            idx = int(dist.sample())
 
-        self.pending.append((enc, action, mask.numpy(), "bid"))
-        return action                               # Index == Gebot
+        if not self.greedy:
+            self.pending.append((enc, idx, mask.numpy(), "bid"))
+        return idx        # beim Bid ist der Index direkt das Gebot
     
     def choose_card(self, observation, legal_cards: list[Card]):
         enc = encode(observation)
@@ -77,11 +83,14 @@ class RLAgent:
         mask = torch.from_numpy(multi_hot(legal_cards)).bool()
         play_logits = play_logits.masked_fill(~mask, float('-inf'))
 
-        dist = torch.distributions.Categorical(logits=play_logits)   # Softmax passiert HIER
-        
-        idx = int(dist.sample())
+        dist = torch.distributions.Categorical(logits=play_logits)
+        if self.greedy:
+            idx = int(play_logits.argmax())      # deterministisch, bester Zug
+        else:
+            idx = int(dist.sample())             # sampeln, Exploration
 
-        self.pending.append((enc, idx, mask.numpy(), "play"))
+        if not self.greedy:
+            self.pending.append((enc, idx, mask.numpy(), "play"))
         return Card(color=COLORS[idx // 15], value=idx % 15) 
 
     def observe_reward(self, reward):
