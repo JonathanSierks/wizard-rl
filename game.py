@@ -42,7 +42,8 @@ class Game:
         self.players.append(player)
 
     def start(self):
-        
+
+        # play 1 game = iterate over ROUNDS
         for round_nr in range(1, self.number_of_rounds + 1):
             
             #print(f"=========== ROUND: {round_nr} ===========")
@@ -113,11 +114,12 @@ class Game:
             current_lead = first_player          # erster Stich: Anspieler = erster Bieter
             # n = len(self.players)  ist aus dem Bid-Block schon gesetzt
 
-            # iterate over the tricks of a round
+            # play 1 round = iterate over TRICKS
             for _ in range(round_nr):
                 trick = Trick(trump, current_lead)
                 order = [(current_lead + i) % n for i in range(n)]    # Spielreihenfolge dieses Stichs
 
+                # play 1 trick = iterate over PLAYERS/CARDS
                 for pid in order:
                     player = self.players[pid]
 
@@ -149,7 +151,7 @@ class Game:
                 self.players[winner_id].won_tricks += 1
                 current_lead = winner_id                          # Gewinner spielt nächsten Stich an
 
-        # ── ASSERT 4b: nach allen Stichen ── Stich-Erhaltung + Hände leer
+            # ── ASSERT 4b: nach allen Stichen ── Stich-Erhaltung + Hände leer
             assert sum(p.won_tricks for p in self.players) == round_nr, \
                 f"Stich-Erhaltung verletzt: {sum(p.won_tricks for p in self.players)} ≠ {round_nr}"
             assert all(not p.hand for p in self.players), \
