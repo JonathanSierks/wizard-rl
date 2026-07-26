@@ -1,7 +1,8 @@
-from model import WizardNet
+from model import WizNet
 from player import RLAgent, RandomAgent, Player
 from game import Game
 import torch
+import numpy as np
 
 def evaluate(net, n_games=200):
     net.eval()
@@ -42,10 +43,14 @@ obs_dim = 60 + 60 + 180 + 5 + 9 + (1 + 1 + 1)       # dim = 317
 max_bid = 20
 hidden_dim = 256
 
-net = WizardNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
+net = WizNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
 agents = [RLAgent(net) for _ in range(3)]   
 players = [Player(f"p{i}", i, agents[i]) for i in range(3)]   # SELF-PLAY: derselbe Agent
-game = Game(players)
+player1, player2, player3 = players
+game = Game()
+game.add_player(player1)
+game.add_player(player2)
+game.add_player(player3)
 
 opt = torch.optim.Adam(net.parameters(), lr=1e-3)
 
