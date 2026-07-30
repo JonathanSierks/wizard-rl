@@ -125,7 +125,9 @@ class Player:
         self.hand = []
         self.points = 0
         self.called_tricks = 0
-        self.won_tricks = 0  
+        self.won_tricks = 0 
+        self.bid_hits = 0
+        self.rounds_played = 0 
 
     def call_tricks(self, observation, valid_bids):
         bid = self.agent.choose_bid(observation, valid_bids)

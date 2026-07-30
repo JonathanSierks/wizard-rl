@@ -27,6 +27,13 @@ def calculate_points(players):
                else abs(player.called_tricks - player.won_tricks) * -10)
         player.points += pts
         round_points[player.id] = pts
+
+        # in calculate_points, pro Spieler:
+        player.rounds_played += 1
+        
+        if player.called_tricks == player.won_tricks:
+            player.bid_hits += 1
+
     return round_points
 
 class Game:
