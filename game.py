@@ -3,7 +3,7 @@ from cards import CardDeck, Card
 from tricks import Trick, legal_cards, resolve_winner
 import random
 from observations import BidObservation, PlayObservation
-
+from termcolor import colored
 
 NUMBER_OF_ROUNDS = 20
 
@@ -173,6 +173,123 @@ class Game:
             #print(f"Nach Runde {round_nr} ist das Standing:")
             #for p in self.players:
             #    print(f"Spieler {p.id} hat {p.points}")
-            
-    
-    # 5) determine GAME WINNER
+
+    def start_verbose(self):
+        for round_nr in range(1, self.number_of_rounds + 1):
+
+            print(f"=========== ROUND: {round_nr} ===========")
+
+            deck = CardDeck()
+
+            assert all(not p.hand for p in self.players), \
+                f"Hand nicht leer zu Beginn von Runde {round_nr}"
+
+            # 1) deal cards
+            for player in self.players:
+                for i in range(round_nr):
+                    player.hand.append(deck.draw_card())
+                assert sum(len(p.hand) for p in self.players) + len(deck.cards) == 60, \
+                    "Karten sind verloren gegangen oder doppelt"
+
+            trump = determine_trump(deck, round_nr)
+
+            # --- HAND + TRUMP ausgeben ---
+            for player in self.players:
+                hand_str = ", ".join(colored(str(c.value), c.color) for c in player.hand)
+                print(f"HAND{player.name}: {hand_str}")
+            trump_str = "None" if trump == "none" else colored(trump, trump)
+            print(f"Trump: {trump_str}")
+            print("\n")
+
+            first_player = (round_nr - 1) % len(self.players)
+
+            # 2) bidding
+            for p in self.players:
+                p.called_tricks = None
+                p.won_tricks = 0
+
+            n = len(self.players)
+            order = [(first_player + i) % n for i in range(n)]
+
+            print("#### CALLS ####")
+            for n_bid_before, pid in enumerate(order):
+                player = self.players[pid]
+
+                bids_and_wins = [(p.called_tricks, p.won_tricks)
+                                for p in self._rotate_to(pid)]
+
+                obs = BidObservation(player.hand, trump, bids_and_wins, n_bid_before, round_nr)
+
+                valid_bids = list(range(round_nr + 1))
+                if n_bid_before == n - 1:
+                    schon = sum(p.called_tricks for p in self.players if p.called_tricks is not None)
+                    verboten = round_nr - schon
+                    if verboten in valid_bids:
+                        valid_bids.remove(verboten)
+
+                player.called_tricks = player.call_tricks(obs, valid_bids)
+                print(f"Spieler {player.name} CALLED = {player.called_tricks}")
+            print("\n")
+
+            assert all(p.called_tricks is not None for p in self.players), \
+                "Nicht jeder hat geboten"
+            assert all(0 <= p.called_tricks <= round_nr for p in self.players), \
+                "Gebot außerhalb 0..round_nr"
+            assert sum(p.called_tricks for p in self.players) != round_nr, \
+                "Gebotssumme = round_nr — screw-the-dealer wurde verletzt"
+
+            # 3) playing
+            print(f"#### Plays of ROUND {round_nr} ####")
+            played_cards = []
+            current_lead = first_player
+
+            for trick_idx in range(round_nr):
+                print(f"## TRICK {trick_idx} of ROUND {round_nr} ##")
+                trick = Trick(trump, current_lead)
+                order = [(current_lead + i) % n for i in range(n)]
+
+                for pid in order:
+                    player = self.players[pid]
+
+                    trick_so_far = [((p_id - pid) % n, card) for p_id, card in trick.plays]
+                    bids_and_wins = [(p.called_tricks, p.won_tricks) for p in self._rotate_to(pid)]
+                    obs = PlayObservation(
+                        hand=list(player.hand),
+                        trump=trump,
+                        trick_so_far=trick_so_far,
+                        played_cards=list(played_cards),
+                        bids_and_wins=bids_and_wins,
+                        round_nr=round_nr
+                    )
+
+                    legal = legal_cards(player.hand, trick.plays)
+                    card = player.play_card(obs, legal)
+                    print(f"{player.name} spielt {colored(str(card.value), card.color)}")
+                    trick.add((pid, card))
+                    played_cards.append(card)
+
+                assert len(trick.plays) == n, "Nicht jeder hat eine Karte gespielt"
+
+                winner_id = resolve_winner(trick.plays, trump)
+                self.players[winner_id].won_tricks += 1
+                current_lead = winner_id
+                print(f"Spieler {self.players[winner_id].name} hat den Stich gewonnen!")
+                print("\n")
+
+            assert sum(p.won_tricks for p in self.players) == round_nr, \
+                f"Stich-Erhaltung verletzt: {sum(p.won_tricks for p in self.players)} ≠ {round_nr}"
+            assert all(not p.hand for p in self.players), \
+                "Nach der Runde sind noch Karten übrig"
+
+            # 4) points
+            round_points = calculate_points(self.players)
+            for p in self.players:
+                p.observe_reward(round_points[p.id])
+
+            print(f"#### STATS (for ROUND {round_nr}) ####")
+            for p in self.players:
+                print(f"Spieler {p.name}: CALLED = {p.called_tricks}; "
+                    f"WON = {p.won_tricks}; POINTS = {p.points}")
+            print("\n")            
+        
+        # 5) determine GAME WINNER
