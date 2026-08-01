@@ -64,6 +64,14 @@ class RLAgent:
         bid_logits = bid_logits.masked_fill(~mask, float('-inf'))
 
         dist = torch.distributions.Categorical(logits=bid_logits)
+
+        # print bidding model states
+        torch.set_printoptions(precision=3, sci_mode=False)
+        print("logits:", bid_logits)
+        print("probs :", dist.probs)
+        print("argmax:", dist.probs.argmax().item())
+        print("mask  :", mask)
+        
         if self.greedy:
             idx = int(bid_logits.argmax())
         else:
