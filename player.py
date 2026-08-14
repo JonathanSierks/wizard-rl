@@ -45,9 +45,11 @@ def encode(obs) -> np.ndarray:
 
 
 class RLAgent:
-    def __init__(self, net, greedy=False):
+    def __init__(self, net, greedy=False, debug=False):
         self.net = net
         self.greedy = greedy
+        self.debug = debug
+        self.bid_logits_log = []
         self.pending = []
         self.buffer = []
         self.gamma = 1.0        # we choose NOT to to discount reward for actions further back in time
@@ -56,30 +58,31 @@ class RLAgent:
         enc = encode(observation)
         x = torch.from_numpy(enc)
 
-        with torch.no_grad():                       # Inference — kein Gradient nötig
-            bid_logits, _ = self.net(x)             # net(x), nicht net.forward(x)
+        with torch.no_grad():
+            raw_logits, _ = self.net(x)          # [21], noch ohne -inf
 
-        mask = torch.zeros(bid_logits.shape[0], dtype=torch.bool)
-        mask[valid_bids] = True                     # valid_bids sind direkt die Indizes
-        bid_logits = bid_logits.masked_fill(~mask, float('-inf'))
+        if self.debug:
+            self.bid_logits_log.append((raw_logits.clone(), observation.round_nr))
+
+        mask = torch.zeros(raw_logits.shape[0], dtype=torch.bool)
+        mask[valid_bids] = True
+        bid_logits = raw_logits.masked_fill(~mask, float('-inf'))
 
         dist = torch.distributions.Categorical(logits=bid_logits)
 
-        # print bidding model states
-        torch.set_printoptions(precision=3, sci_mode=False)
-        print("logits:", bid_logits)
-        print("probs :", dist.probs)
-        print("argmax:", dist.probs.argmax().item())
-        print("mask  :", mask)
-        
+        # print bidding model states; only activate for jupyter debugging
+        # print("logits:", bid_logits)
+        # print("probs :", dist.probs)
+        # print("argmax:", dist.probs.argmax().item())
+        # print("mask  :", mask)
+
         if self.greedy:
             idx = int(bid_logits.argmax())
         else:
             idx = int(dist.sample())
-
-        if not self.greedy:
             self.pending.append((enc, idx, mask.numpy(), "bid"))
-        return idx        # beim Bid ist der Index direkt das Gebot
+        return idx
+    
     
     def choose_card(self, observation, legal_cards: list[Card]):
         enc = encode(observation)
@@ -89,9 +92,16 @@ class RLAgent:
             _, play_logits = self.net(x)             # net(x), nicht net.forward(x)
 
         mask = torch.from_numpy(multi_hot(legal_cards)).bool()
-        play_logits = play_logits.masked_fill(~mask, float('-inf'))
+        play_logits = play_logits.masked_fill(~mask, float('-inf'))  
 
         dist = torch.distributions.Categorical(logits=play_logits)
+
+        # print play model states; only activate for jupyter debugging    
+        # print("logits:", play_logits)
+        # print("probs :", dist.probs)
+        # print("argmax:", dist.probs.argmax().item())
+        # print("mask  :", mask)
+
         if self.greedy:
             idx = int(play_logits.argmax())      # deterministisch, bester Zug
         else:
