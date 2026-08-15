@@ -7,8 +7,14 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
+import random
+SEED = 0
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_improved_metrics.01"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_rl_opponent"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -24,16 +30,30 @@ def rank_ratio(M):
     s = torch.linalg.svdvals(M)
     return (s[0] / s.sum()).item()
 
-def evaluate(net, n_games=200, collect=False):
+def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
+    py_state = random.getstate()
+    th_state = torch.get_rng_state()
+    random.seed(eval_seed)
+    torch.manual_seed(eval_seed)
+
     net.eval()
+    if net_opp is not None:
+        net_opp.eval()
     totals, hits = [], []
     logits_log = []
 
     with torch.no_grad():
         for _ in range(n_games):
-            players = [Player("rl", 0, RLAgent(net, greedy=True, debug=collect)),
-                    Player("r1", 1, RandomAgent()),
-                    Player("r2", 2, RandomAgent())]
+            player = [Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))]
+            
+            if net_opp is not None:
+                others = [Player("other1", 1, RLAgent(net_opp, greedy=True)),
+                            Player("other2", 2, RLAgent(net_opp, greedy=True))]
+            else:
+                others = [Player("r1", 1, RandomAgent()),
+                            Player("r2", 2, RandomAgent())]
+            players = player + others
+
             game = Game()
             for p in players:
                 game.add_player(p)
@@ -50,9 +70,16 @@ def evaluate(net, n_games=200, collect=False):
     if collect: 
         M = torch.stack([lg for lg, _ in logits_log])              # [n, 21]
         rsizes = torch.tensor([r for _, r in logits_log])           # [n]
+
+        random.setstate(py_state)
+        torch.set_rng_state(th_state)
         return sum(totals)/len(totals), hits, M, rsizes
 
-    return sum(totals)/len(totals), hits    
+    random.setstate(py_state)
+    torch.set_rng_state(th_state)
+    return sum(totals)/len(totals), hits
+
+         
     
 
 # buffer = (enc, action, mask, head, G)             ; bids und alle aktionen mit G; einzelner buffer JE SPIELER; wächst in länge über Game
@@ -107,6 +134,9 @@ max_bid = 20
 hidden_dim = 256
 
 net = WizNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
+net_opp = WizNet(obs_dim, max_bid, hidden_dim)
+net_opp.load_state_dict(torch.load("checkpoints/up_20260815_132349_750.pt"))
+
 #agents = [RLAgent(net) for _ in range(3)]   
 #players = [Player(f"p{i}", i, agents[i]) for i in range(3)]   # SELF-PLAY: derselbe Agent
 #player1, player2, player3 = players
@@ -132,7 +162,13 @@ for update in range(50_000):
             batch.extend(ag.drain_buffer())
     
     loss, stats = reinforce_loss(net, batch)
-    opt.zero_grad(); loss.backward(); opt.step()
+    opt.zero_grad()
+    loss.backward()
+
+    g = torch.cat([p.grad.flatten() for p in net.bid_head.parameters()])
+    writer.add_scalar("grad/bid_head_norm", g.norm().item(), update)
+
+    opt.step()
 
     writer.add_scalar("loss/total",                     loss.item(),                    update)
     writer.add_scalar("policy/bid_entropy",             stats["bid_entropy"],           update)
@@ -146,21 +182,27 @@ for update in range(50_000):
     writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
     writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
 
+
     if update % 50 == 0:
-        collect = (update % 500 == 0)        # Rang seltener, ist teurer
+        collect = (update % 250 == 0)        # Rang seltener, ist teurer
 
         if collect:
-            points, hits, M, rsizes = evaluate(net, collect=True)
-            writer.add_scalar("rank/bid_all", rank_ratio(M), update)
+            points, hits, M, rsizes = evaluate(net, n_games=1000, collect=True)         # rang: 1x rl vs. 2x random agents
+            writer.add_scalar("rank/bid_all_random", rank_ratio(M), update)
             for r in (5, 10, 20):
-                writer.add_scalar(f"rank/bid_r{r}", rank_ratio(M[rsizes == r]), update)
+                writer.add_scalar(f"rank/bid_r{r}_random", rank_ratio(M[rsizes == r]), update)
         else:
-            points, hits = evaluate(net)
+            points, hits = evaluate(net)                    # play against random agents
+
+        points_opp, hits_opp = evaluate(net, net_opp)   # play against rl instance
 
         writer.add_scalar("eval/score_vs_random", points, update)
-        writer.add_scalar("eval/bid_accuracy", sum(hits)/len(hits), update)
+        writer.add_scalar("eval/score_vs_rl", points_opp, update)
+        writer.add_scalar("eval/bid_accuracy_random", sum(hits)/len(hits), update)
+        writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
         writer.flush()
-        print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f}")
+        print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
+        print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")
 
-    if update % 300 == 0:
+    if update % 250 == 0:
         torch.save(net.state_dict(), f"checkpoints/up_{run_time}_{update}.pt")

@@ -1,6 +1,10 @@
 from random import shuffle, choice
 from dataclasses import dataclass
 
+import random
+SEED = 0
+random.seed(SEED)
+
 NUM_CARDS = 60
 COLORS = ["green", "red", "blue", "yellow"]
 VALUES = range(0,15)
