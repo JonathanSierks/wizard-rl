@@ -4,6 +4,12 @@ import numpy as np
 from observations import BidObservation, PlayObservation
 import torch
 
+import random
+SEED = 0
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
 def card_index(card):
     return COLORS.index(card.color) * 15 + card.value
 
