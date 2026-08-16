@@ -9,9 +9,10 @@ class WizNet(nn.Module):
         self.layer2 = nn.Linear(hidden_dim, hidden_dim)
         self.bid_head = nn.Linear(hidden_dim, max_bid + 1)
         self.card_head = nn.Linear(hidden_dim, 60)
+        self.value_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, enc_obs):
         h = F.relu(self.layer1(enc_obs))
         h = F.relu(self.layer2(h))
 
-        return self.bid_head(h), self.card_head(h)
+        return self.bid_head(h), self.card_head(h), self.value_head(h).squeeze(-1)
