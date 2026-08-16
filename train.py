@@ -14,14 +14,16 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_rl_opponent"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_value_head"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
 # hyperparams
-BETA = 0.01
+BETA_BID = 0.05
+BETA_PLAY = 0.01
 LR = 3e-4
+G_SCALE = 50
 
 def rank_ratio(M):
     if M.shape[0] < 30:                  # zu wenige Zeilen → nicht aussagekräftig
@@ -90,7 +92,8 @@ def reinforce_loss(net, batch):
     stats = {}
     for head_name, head_idx in (("bid", 0), ("play", 1)):
         group = [b for b in batch if b[3] == head_name]
-
+        if not group:
+            continue
         '''
         b = (enc, action, mask, head, G)
         #    b[0]  b[1]   b[2]  b[3]  b[4]
@@ -102,9 +105,7 @@ def reinforce_loss(net, batch):
         b[4]  float                               # der Return, den du beim Drainen zugewiesen hast
         '''    
 
-        if not group:
-            continue
-        G = torch.tensor([b[4] for b in group], dtype=torch.float32)
+        G = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
         adv = (G - G.mean()) / (G.std() + 1e-8)          # Baseline JE Kopf
         #print(adv)
 
@@ -112,15 +113,32 @@ def reinforce_loss(net, batch):
         act = torch.tensor([b[1] for b in group])
         msk = torch.from_numpy(np.stack([b[2] for b in group])).bool()
 
-        logits = net(enc)[head_idx].masked_fill(~msk, float('-inf'))
-        dist   = torch.distributions.Categorical(logits=logits)
+        out = net(enc)
+        logits = out[head_idx].masked_fill(~msk, float('-inf'))
+        V = out[2]
 
+        adv = G - V.detach()
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        dist   = torch.distributions.Categorical(logits=logits)
         loss_return  = -(dist.log_prob(act) * adv).mean()   # <- .mean() hier dazu → Skalar pro Kopf
-        loss_entropy = - BETA * dist.entropy().mean()
-        losses.append(loss_return + loss_entropy)           # 0-D
+        beta = BETA_BID if head_name == "bid" else BETA_PLAY
+        loss_entropy = - beta * dist.entropy().mean()
+        loss_value = (V-G).pow(2).mean()
+
+        losses.append(loss_return + loss_entropy + loss_value)           # 0-D
+
         real = msk.sum(dim=1) > 1                           # was there more than 1 option within the mask? only than we have a "real" decision and should measure
         n_legal = msk.sum(dim=1).float()
+
+        with torch.no_grad():
+            vc = np.corrcoef(V.detach().numpy(), G.numpy())[0, 1]
+        stats[f"{head_name}_value_corr"] = float(vc)
+
         # pack values and send them out of function to log them in main train loop
+        stats[f"{head_name}_loss_return"] = loss_return.item()
+        stats[f"{head_name}_loss_entropy"] = loss_entropy.item()
+        stats[f"{head_name}_loss_value"] = loss_value.item()
         stats[f"{head_name}_entropy_real"]      = dist.entropy()[real].mean().item()
         stats[f"{head_name}_entropy"]      = dist.entropy().mean().item()
         stats[f"{head_name}_logit_absmax"] = logits[real][msk[real]].abs().max().item()
@@ -135,7 +153,7 @@ hidden_dim = 256
 
 net = WizNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
 net_opp = WizNet(obs_dim, max_bid, hidden_dim)
-net_opp.load_state_dict(torch.load("checkpoints/up_20260815_132349_750.pt"))
+net_opp.load_state_dict(torch.load("checkpoints/up_20260815_161453_6000.pt"), strict=False)
 
 #agents = [RLAgent(net) for _ in range(3)]   
 #players = [Player(f"p{i}", i, agents[i]) for i in range(3)]   # SELF-PLAY: derselbe Agent
@@ -149,7 +167,7 @@ opt = torch.optim.Adam(net.parameters(), lr=LR)
 
 for update in range(50_000):
 
-    # create a batch of 20 games to reduce impact of noise; 1 game = 690 Transitions, 20 games = 14k transitions
+    # create a batch of 20 games to reduce impact of noise; 1 game = 690 Transitions, 20 games = 13.800k transitions; 1.200 bid transistions, 12.600 play transitions
     batch = []
     for _ in range(20):
         agents = [RLAgent(net) for _ in range(3)]
@@ -169,8 +187,12 @@ for update in range(50_000):
     writer.add_scalar("grad/bid_head_norm", g.norm().item(), update)
 
     opt.step()
+    for h in ("bid", "play"):
+        writer.add_scalar(f"loss/{h}_return",  stats[f"{h}_loss_return"],  update)
+        writer.add_scalar(f"loss/{h}_entropy", stats[f"{h}_loss_entropy"], update)
+        writer.add_scalar(f"loss/{h}_value",   stats[f"{h}_loss_value"],   update)
+        writer.add_scalar(f"value/{h}_corr",   stats[f"{h}_value_corr"],   update)
 
-    writer.add_scalar("loss/total",                     loss.item(),                    update)
     writer.add_scalar("policy/bid_entropy",             stats["bid_entropy"],           update)
     writer.add_scalar("policy/bid_entropy_real",        stats["bid_entropy_real"],      update)
     writer.add_scalar("policy/play_entropy",            stats["play_entropy"],          update)
@@ -182,7 +204,6 @@ for update in range(50_000):
     writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
     writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
 
-
     if update % 50 == 0:
         collect = (update % 250 == 0)        # Rang seltener, ist teurer
 
@@ -191,6 +212,13 @@ for update in range(50_000):
             writer.add_scalar("rank/bid_all_random", rank_ratio(M), update)
             for r in (5, 10, 20):
                 writer.add_scalar(f"rank/bid_r{r}_random", rank_ratio(M[rsizes == r]), update)
+
+            bids20 = M[rsizes == 20].argmax(dim=1)
+            writer.add_histogram("bids/round20", bids20, update)
+            writer.add_scalar("bids/mean_r20", bids20.float().mean().item(), update)
+            writer.add_scalar("bids/max_r20",  bids20.max().item(), update)
+
+
         else:
             points, hits = evaluate(net)                    # play against random agents
 

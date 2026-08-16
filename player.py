@@ -65,7 +65,7 @@ class RLAgent:
         x = torch.from_numpy(enc)
 
         with torch.no_grad():
-            raw_logits, _ = self.net(x)          # [21], noch ohne -inf
+            raw_logits, _, _ = self.net(x)          # [21], noch ohne -inf
 
         if self.debug:
             self.bid_logits_log.append((raw_logits.clone(), observation.round_nr))
@@ -95,7 +95,7 @@ class RLAgent:
         x = torch.from_numpy(enc)
 
         with torch.no_grad():                       # Inference — kein Gradient nötig
-            _, play_logits = self.net(x)             # net(x), nicht net.forward(x)
+            _, play_logits, _ = self.net(x)             # net(x), nicht net.forward(x)
 
         mask = torch.from_numpy(multi_hot(legal_cards)).bool()
         play_logits = play_logits.masked_fill(~mask, float('-inf'))  
