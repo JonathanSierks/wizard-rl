@@ -196,7 +196,7 @@ class Game:
             # --- HAND + TRUMP ausgeben ---
             for player in self.players:
                 hand_str = ", ".join(colored(str(c.value), c.color) for c in player.hand)
-                print(f"HAND{player.name}: {hand_str}")
+                print(f"HAND of {player.name}: {hand_str}")
             trump_str = "None" if trump == "none" else colored(trump, trump)
             print(f"Trump: {trump_str}")
             print("\n")
@@ -244,7 +244,7 @@ class Game:
             current_lead = first_player
 
             for trick_idx in range(round_nr):
-                print(f"## TRICK {trick_idx} of ROUND {round_nr} ##")
+                print(f"## TRICK {trick_idx+1} of ROUND {round_nr} ##")
                 trick = Trick(trump, current_lead)
                 order = [(current_lead + i) % n for i in range(n)]
 
@@ -274,6 +274,11 @@ class Game:
                 self.players[winner_id].won_tricks += 1
                 current_lead = winner_id
                 print(f"Spieler {self.players[winner_id].name} hat den Stich gewonnen!")
+                print(f"Spieler standings (called/won):")
+                print(f"{self.players[0].name}: {self.players[0].called_tricks} / {self.players[0].won_tricks}")
+                print(f"{self.players[1].name}: {self.players[1].called_tricks} / {self.players[1].won_tricks}")
+                print(f"{self.players[2].name}: {self.players[2].called_tricks} / {self.players[2].won_tricks}")
+                print(f"{trick_idx - round_nr} tricks to go")
                 print("\n")
 
             assert sum(p.won_tricks for p in self.players) == round_nr, \
