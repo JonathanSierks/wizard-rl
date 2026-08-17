@@ -3,6 +3,8 @@ from cards import Card, COLORS, TRUMP
 import numpy as np
 from observations import BidObservation, PlayObservation
 import torch
+import argparse
+from termcolor import colored
 
 import random
 SEED = 0
@@ -141,6 +143,35 @@ class RandomAgent:
         pass
 
 
+class HumanAgent:
+    def choose_bid(self, obs, valid_bids):
+        print("What bid would you like to make?")
+        while True:
+            try:
+                bid = int(input(f"Gebot: "))
+                if bid in valid_bids: return bid
+            except ValueError: pass
+
+
+    def choose_card(self, obs, legal_cards):
+        hand_str = ", ".join(colored(str(c.value), c.color) for c in obs.hand)
+        print(f"Your hand is: [{hand_str}]")
+        print(f"Trumpf: {obs.trump}")
+        print("What card index would you like to play?")
+        x = int(input())
+    
+        while obs.hand[x] not in legal_cards:
+            try:
+                print("Invalid card. Try again")
+                x = int(input())
+            except ValueError: pass
+        return obs.hand[x]
+
+
+    def observe_reward(self, reward):
+        pass
+
+
 class Player:
     def __init__(self, name, id, agent=None):
         self.agent = agent
@@ -167,3 +198,6 @@ class Player:
     
     def observe_reward(self, reward):
         self.agent.observe_reward(reward)
+
+
+
