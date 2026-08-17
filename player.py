@@ -148,25 +148,31 @@ class HumanAgent:
         print("What bid would you like to make?")
         while True:
             try:
-                bid = int(input(f"Gebot: "))
-                if bid in valid_bids: return bid
-            except ValueError: pass
-
+                bid = int(input("Gebot: "))
+            except ValueError:
+                print("Bitte eine Zahl.")
+                continue
+            if bid in valid_bids:
+                return bid
+            print(f"Ungültig. Erlaubt: {valid_bids}")
 
     def choose_card(self, obs, legal_cards):
         hand_str = ", ".join(colored(str(c.value), c.color) for c in obs.hand)
         print(f"Your hand is: [{hand_str}]")
         print(f"Trumpf: {obs.trump}")
         print("What card index would you like to play?")
-        x = int(input())
-    
-        while obs.hand[x] not in legal_cards:
+        while True:
             try:
-                print("Invalid card. Try again")
-                x = int(input())
-            except ValueError: pass
-        return obs.hand[x]
-
+                i = int(input())
+            except ValueError:
+                print("Bitte eine Zahl.")
+                continue
+            if not 0 <= i < len(obs.hand):
+                print(f"Index außerhalb der Hand (0..{len(obs.hand)-1}).")
+                continue
+            if obs.hand[i] in legal_cards:
+                return obs.hand[i]
+            print("Karte nicht spielbar (Farbzwang).")
 
     def observe_reward(self, reward):
         pass
