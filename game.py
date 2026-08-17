@@ -278,7 +278,7 @@ class Game:
                 print(f"{self.players[0].name}: {self.players[0].called_tricks} / {self.players[0].won_tricks}")
                 print(f"{self.players[1].name}: {self.players[1].called_tricks} / {self.players[1].won_tricks}")
                 print(f"{self.players[2].name}: {self.players[2].called_tricks} / {self.players[2].won_tricks}")
-                print(f"{trick_idx - round_nr} tricks to go")
+                print(f"{round_nr - (trick_idx + 1) } tricks to go")
                 print("\n")
 
             assert sum(p.won_tricks for p in self.players) == round_nr, \
