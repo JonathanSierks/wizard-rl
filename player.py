@@ -188,7 +188,8 @@ class Player:
         self.called_tricks = 0
         self.won_tricks = 0 
         self.bid_hits = 0
-        self.rounds_played = 0 
+        self.rounds_played = 0
+        self.round_log = []         # used in calculate_points() to create a history over called and won tricks per round, to access that info in evaluate and create another metric out of it
 
     def call_tricks(self, observation, valid_bids):
         bid = self.agent.choose_bid(observation, valid_bids)
