@@ -88,7 +88,6 @@ ENV/
 # mypy
 .mypy_cache/checkpoints/
 rl_runs/
-*.pt
 __pycache__/
-checkpoints/*
-checkpoints/
+*.pt
+!relevant_checkpoints/*.pt
