@@ -153,7 +153,7 @@ hidden_dim = 256
 
 net = WizNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
 net_opp = WizNet(obs_dim, max_bid, hidden_dim)
-net_opp.load_state_dict(torch.load("checkpoints/up_20260815_161453_6000.pt"), strict=False)
+net_opp.load_state_dict(torch.load("relevant_checkpoints/up_20260815_161453_6000.pt"), strict=False)
 
 #agents = [RLAgent(net) for _ in range(3)]   
 #players = [Player(f"p{i}", i, agents[i]) for i in range(3)]   # SELF-PLAY: derselbe Agent

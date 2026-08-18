@@ -11,8 +11,8 @@ def start_game():
     hidden_dim = 256
 
     net_1000 = WizNet(obs_dim, max_bid, hidden_dim)
-    #net_1000.load_state_dict(torch.load("checkpoints/up900.pt"))
-    net_1000.load_state_dict(torch.load("checkpoints/up_20260815_161453_6000.pt"), strict=False)
+    #net_1000.load_state_dict(torch.load("relevant_checkpoints/up_20260816_160023_750.pt"))
+    net_1000.load_state_dict(torch.load("relevant_checkpoints/up_20260815_161453_6000.pt"), strict=False)
 
     player1 = Player("human1", 0, agent=HumanAgent())
     player2 = Player("rl1", 1, agent=RLAgent(net_1000, greedy=True))
