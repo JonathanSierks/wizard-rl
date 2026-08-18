@@ -4,6 +4,7 @@ from game import Game
 import torch
 import numpy as np
 
+
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
@@ -14,7 +15,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_value_head"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_r**2_round_sampling"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -45,6 +46,7 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
     logits_log = []
 
     with torch.no_grad():
+        rows = []               # history to store player.round_logs over multiple games
         for _ in range(n_games):
             player = [Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))]
             
@@ -65,8 +67,24 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
             rl = players[0]
             hits.append(rl.bid_hits / rl.rounds_played)     # Trefferquote über ALLE 20 Runden
 
+            rows.extend(rl.round_log)
+                
+                
             if collect:
                 logits_log.extend(rl.agent.bid_logits_log)
+
+        r  = torch.tensor([x[0] for x in rows])
+        bd = torch.tensor([x[1] for x in rows])
+        wn = torch.tensor([x[2] for x in rows])
+
+        for size in (3, 8, 14, 20):
+            m = r == size
+            if m.sum() == 0: continue
+            d = (bd[m] - wn[m]).float()
+            writer.add_scalar(f"bias/mean_r{size}", d.mean().item(), update)
+            writer.add_scalar(f"bias/mae_r{size}",  d.abs().mean().item(), update)
+            writer.add_scalar(f"acc/r{size}",       (d == 0).float().mean().item(), update)
+            
     net.train()
 
     if collect: 
@@ -76,6 +94,7 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
         random.setstate(py_state)
         torch.set_rng_state(th_state)
         return sum(totals)/len(totals), hits, M, rsizes
+
 
     random.setstate(py_state)
     torch.set_rng_state(th_state)
@@ -174,7 +193,7 @@ for update in range(50_000):
         game = Game()
         for i, ag in enumerate(agents):
             game.add_player(Player(f"p{i}", i, ag))
-        game.start()
+        game.start_sample()
 
         for ag in agents:
             batch.extend(ag.drain_buffer())
@@ -202,7 +221,7 @@ for update in range(50_000):
     writer.add_scalar("policy/play_entropy_norm",       stats["play_entropy_norm"],     update)
     writer.add_scalar("policy/bid_entropy_norm",        stats["bid_entropy_norm"],      update)
     writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
-    writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
+    writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)    
 
     if update % 50 == 0:
         collect = (update % 250 == 0)        # Rang seltener, ist teurer
@@ -217,7 +236,6 @@ for update in range(50_000):
             writer.add_histogram("bids/round20", bids20, update)
             writer.add_scalar("bids/mean_r20", bids20.float().mean().item(), update)
             writer.add_scalar("bids/max_r20",  bids20.max().item(), update)
-
 
         else:
             points, hits = evaluate(net)                    # play against random agents

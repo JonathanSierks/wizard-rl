@@ -4,8 +4,13 @@ from tricks import Trick, legal_cards, resolve_winner
 import random
 from observations import BidObservation, PlayObservation
 from termcolor import colored
+from collections import Counter
 
 NUMBER_OF_ROUNDS = 20
+ROUND_WEIGHTS = [r**2 for r in range(1, NUMBER_OF_ROUNDS + 1)]
+
+def sample_round_sizes(n=NUMBER_OF_ROUNDS):
+    return random.choices(range(1, NUMBER_OF_ROUNDS + 1), weights=ROUND_WEIGHTS, k=n)
 
 def determine_trump(deck, round_nr):
     if round_nr == NUMBER_OF_ROUNDS:
@@ -19,7 +24,7 @@ def determine_trump(deck, round_nr):
     else:
         return potential_trump_card.color
 
-def calculate_points(players):
+def calculate_points(players, round_nr):
     round_points = {}
     for player in players:
         pts = (20 + player.called_tricks * 10
@@ -30,6 +35,7 @@ def calculate_points(players):
 
         # in calculate_points, pro Spieler:
         player.rounds_played += 1
+        player.round_log.append((round_nr, player.called_tricks, player.won_tricks))        # for bias metric
         
         if player.called_tricks == player.won_tricks:
             player.bid_hits += 1
@@ -48,10 +54,14 @@ class Game:
     def add_player(self, player):
         self.players.append(player)
 
-    def start(self):
+    def start(self, round_sizes=None):
+
+        # normal OR sampling logic
+        if round_sizes is None:
+            round_sizes = list(range(1, self.number_of_rounds + 1))   # bisheriges Verhalten
 
         # play 1 game = iterate over ROUNDS
-        for round_nr in range(1, self.number_of_rounds + 1):
+        for idx, round_nr in enumerate(round_sizes):
             
             #print(f"=========== ROUND: {round_nr} ===========")
             # -1) initialize CardDeck
@@ -76,7 +86,7 @@ class Game:
             trump = determine_trump(deck, round_nr)
             #print(f"Trump: {trump}")
 
-            first_player = (round_nr - 1) % len(self.players)
+            first_player = idx % len(self.players)
             #print(first_player)
             
             # 2) bidding
@@ -167,7 +177,7 @@ class Game:
             # 4) count points, write points
             
             #after 1 full round: calculate points and calculate rewards backwards
-            round_points = calculate_points(self.players)
+            round_points = calculate_points(self.players, round_nr)
             for p in self.players:
                 p.observe_reward(round_points[p.id]) 
             #print(f"Nach Runde {round_nr} ist das Standing:")
@@ -298,3 +308,7 @@ class Game:
             print("\n")            
         
         # 5) determine GAME WINNER
+
+    def start_sample(self):
+        self.start(sample_round_sizes())
+        
