@@ -90,3 +90,5 @@ ENV/
 rl_runs/
 *.pt
 __pycache__/
+checkpoints/*
+checkpoints/
