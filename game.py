@@ -184,8 +184,13 @@ class Game:
             #for p in self.players:
             #    print(f"Spieler {p.id} hat {p.points}")
 
-    def start_verbose(self):
-        for round_nr in range(1, self.number_of_rounds + 1):
+
+    def start_verbose(self, round_sizes=None):
+        if round_sizes is None:
+            round_sizes = range(1, self.number_of_rounds +1)
+
+
+        for idx, round_nr in enumerate(round_sizes):
 
             print(f"=========== ROUND: {round_nr} ===========")
 
@@ -211,7 +216,7 @@ class Game:
             print(f"Trump: {trump_str}")
             print("\n")
 
-            first_player = (round_nr - 1) % len(self.players)
+            first_player = idx % len(self.players)
 
             # 2) bidding
             for p in self.players:
@@ -297,7 +302,7 @@ class Game:
                 "Nach der Runde sind noch Karten übrig"
 
             # 4) points
-            round_points = calculate_points(self.players)
+            round_points = calculate_points(self.players, round_nr)
             for p in self.players:
                 p.observe_reward(round_points[p.id])
 
