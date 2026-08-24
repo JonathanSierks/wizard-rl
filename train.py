@@ -16,7 +16,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head_additional_metrics"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -38,72 +38,72 @@ def rank_ratio(M):
 def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
     py_state = random.getstate()
     th_state = torch.get_rng_state()
-    random.seed(eval_seed)
-    torch.manual_seed(eval_seed)
+    random.seed(eval_seed); torch.manual_seed(eval_seed)
 
     net.eval()
     if net_opp is not None:
         net_opp.eval()
-    totals, hits = [], []
-    logits_log = []
 
-    with torch.no_grad():
-        rows = []               # history to store player.round_logs over multiple games
-        for _ in range(n_games):
-            player = [Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))]
-            
-            if net_opp is not None:
-                others = [Player("other1", 1, RLAgent(net_opp, greedy=True)),
-                            Player("other2", 2, RLAgent(net_opp, greedy=True))]
-            else:
-                others = [Player("r1", 1, RandomAgent()),
-                            Player("r2", 2, RandomAgent())]
-            players = player + others
+    try:
+        totals, hits, rows, logits_log, cmp_log = [], [], [], [], []
 
-            game = Game()
-            for p in players:
-                game.add_player(p)
-            game.start()
+        with torch.no_grad():
+            for _ in range(n_games):
+                rl = Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))
+                if net_opp is not None:
+                    others = [Player("o1", 1, RLAgent(net_opp, greedy=True)),
+                              Player("o2", 2, RLAgent(net_opp, greedy=True))]
+                else:
+                    others = [Player("r1", 1, RandomAgent()),
+                              Player("r2", 2, RandomAgent())]
 
-            totals.append(players[0].points)
-            rl = players[0]
-            hits.append(rl.bid_hits / rl.rounds_played)     # Trefferquote über ALLE 20 Runden
+                game = Game()
+                for p in [rl] + others:
+                    game.add_player(p)
+                game.start()
 
-            rows.extend(rl.round_log)
-                
-                
-            if collect:
-                logits_log.extend(rl.agent.bid_logits_log)
+                totals.append(rl.points)
+                hits.append(rl.bid_hits / rl.rounds_played)
+                rows.extend(rl.round_log)
+                if collect:
+                    logits_log.extend(rl.agent.bid_logits_log)
+                    cmp_log.extend(rl.agent.bid_compare_log)
 
-        r  = torch.tensor([x[0] for x in rows])
+        # --- Bias pro Rundengroesse ---
+        metrics = {}
+        rr = torch.tensor([x[0] for x in rows])
         bd = torch.tensor([x[1] for x in rows])
         wn = torch.tensor([x[2] for x in rows])
-
         for size in (3, 8, 14, 20):
-            m = r == size
+            m = rr == size
             if m.sum() == 0: continue
             d = (bd[m] - wn[m]).float()
-            writer.add_scalar(f"bias/mean_r{size}", d.mean().item(), update)
-            writer.add_scalar(f"bias/mae_r{size}",  d.abs().mean().item(), update)
-            writer.add_scalar(f"acc/r{size}",       (d == 0).float().mean().item(), update)
-            
-    net.train()
+            metrics[f"bias/mean_r{size}"] = d.mean().item()
+            metrics[f"bias/mae_r{size}"]  = d.abs().mean().item()
+            metrics[f"acc/r{size}"]       = (d == 0).float().mean().item()
 
-    if collect: 
-        M = torch.stack([lg for lg, _ in logits_log])              # [n, 21]
-        rsizes = torch.tensor([r for _, r in logits_log])           # [n]
+        # --- Policy- vs EV-Gebot ---
+        if cmp_log:
+            C = torch.tensor(cmp_log)                    # [n, 4]: r, policy, ev, mode
+            for size in (3, 8, 14, 20):
+                m = C[:, 0] == size
+                if m.sum() == 0: continue
+                metrics[f"bid_policy/mean_r{size}"] = C[m, 1].float().mean().item()
+                metrics[f"bid_policy/max_r{size}"]  = C[m, 1].max().item()
+                metrics[f"bid_ev/mean_r{size}"]     = C[m, 2].float().mean().item()
+                metrics[f"bid_ev/max_r{size}"]      = C[m, 2].max().item()
+                metrics[f"bid_ev/agree_r{size}"]    = (C[m, 1] == C[m, 2]).float().mean().item()
 
+        score = sum(totals) / len(totals)
+        if collect:
+            M = torch.stack([lg for lg, _ in logits_log])
+            rsizes = torch.tensor([x for _, x in logits_log])
+            return score, hits, metrics, M, rsizes
+        return score, hits, metrics
+
+    finally:
         random.setstate(py_state)
         torch.set_rng_state(th_state)
-        return sum(totals)/len(totals), hits, M, rsizes
-
-
-    random.setstate(py_state)
-    torch.set_rng_state(th_state)
-    return sum(totals)/len(totals), hits
-
-         
-    
 
 # buffer = (enc, action, mask, head, G)             ; bids und alle aktionen mit G; einzelner buffer JE SPIELER; wächst in länge über Game
 # pending = (enc, idx, mask.numpy(), "bid"/"play")  ; aktionen einen runde (je SPIELER) ohne G; wächst in länge über Runde
@@ -125,6 +125,7 @@ def reinforce_loss(net, batch):
         b[3]  str, "bid" oder "play"
         b[4]  float                               # der Return, den du beim Drainen zugewiesen hast
         b[5] won_tricks
+        b[6] round_nr (=int(enc[314]))
         '''    
 
         G = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
@@ -149,6 +150,11 @@ def reinforce_loss(net, batch):
         loss_entropy = - beta * dist.entropy().mean()
         loss_value = (V-G).pow(2).mean()
         won = torch.tensor([b[5] for b in group])           # [B] long
+
+        # additionally mask tricks_logits
+        rs = torch.tensor([b[6] for b in group])                    # [B]
+        valid = torch.arange(21)[None, :] <= rs[:, None]            # [B, 21] bool
+        tricks_logits = tricks_logits.masked_fill(~valid, float('-inf'))
         loss_tricks = F.cross_entropy(tricks_logits, won)
 
         losses.append(loss_return + loss_entropy + loss_value + AUX * loss_tricks)           # 0-D
@@ -173,6 +179,13 @@ def reinforce_loss(net, batch):
         stats[f"{head_name}_loss_tricks"] = loss_tricks.item()
         stats[f"tricks_mae_at_{head_name}"]  = (pred_tricks - won).abs().float().mean().item()
 
+        rs = torch.tensor([b[6] for b in group])
+        for r in (3, 8, 14, 20):
+            m = rs == r
+            if m.sum() > 0:
+                stats[f"tricks_mae_r{r}_at_{head_name}"] = \
+                    (pred_tricks[m] - won[m]).abs().float().mean().item()
+
     return torch.stack(losses).mean(), stats
 
 obs_dim = 60 + 60 + 180 + 5 + 9 + (1 + 1 + 1)       # dim = 317
@@ -190,8 +203,6 @@ net_opp.load_state_dict(torch.load("relevant_checkpoints/up_20260815_161453_6000
 #game.add_player(player1)
 #game.add_player(player2)
 #game.add_player(player3)
-
-
 
 
 opt = torch.optim.Adam(net.parameters(), lr=LR)
@@ -219,16 +230,18 @@ for update in range(50_000):
 
     opt.step()
 
-
-
-
     for h in ("bid", "play"):
         writer.add_scalar(f"loss/{h}_return",  stats[f"{h}_loss_return"],  update)
         writer.add_scalar(f"loss/{h}_entropy", stats[f"{h}_loss_entropy"], update)
         writer.add_scalar(f"loss/{h}_value",   stats[f"{h}_loss_value"],   update)
         writer.add_scalar(f"value/{h}_corr",   stats[f"{h}_value_corr"],   update)
-        writer.add_scalar(f"loss/{h}_tricks",   stats[f"{h}_loss_tricks"],   update)
-        writer.add_scalar(f"loss/tricks_mae_at_{h}",   stats[f"tricks_mae_at_{h}"],   update)
+        
+        writer.add_scalar(f"tricks/loss_tricks_at_{h}",   stats[f"{h}_loss_tricks"],   update)
+        writer.add_scalar(f"tricks/mae_at_{h}", stats[f"tricks_mae_at_{h}"], update)
+        for r in (3, 8, 14, 20):
+            k = f"tricks_mae_r{r}_at_{h}"
+            if k in stats:
+                writer.add_scalar(f"tricks/mae_r{r}_at_{h}", stats[k], update)
 
     writer.add_scalar("policy/bid_entropy",             stats["bid_entropy"],           update)
     writer.add_scalar("policy/bid_entropy_real",        stats["bid_entropy_real"],      update)
@@ -241,12 +254,11 @@ for update in range(50_000):
     writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
     writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
 
-
     if update % 50 == 0:
         collect = (update % 250 == 0)        # Rang seltener, ist teurer
 
         if collect:
-            points, hits, M, rsizes = evaluate(net, n_games=1000, collect=True)         # rang: 1x rl vs. 2x random agents
+            points, hits, metrics, M, rsizes = evaluate(net, n_games=1000, collect=True)         # rang: 1x rl vs. 2x random agents
             writer.add_scalar("rank/bid_all_random", rank_ratio(M), update)
             for r in (5, 10, 20):
                 writer.add_scalar(f"rank/bid_r{r}_random", rank_ratio(M[rsizes == r]), update)
@@ -257,14 +269,22 @@ for update in range(50_000):
             writer.add_scalar("bids/max_r20",  bids20.max().item(), update)
 
         else:
-            points, hits = evaluate(net)                    # play against random agents
+            points, hits, metrics = evaluate(net)                  # play against random agents
 
-        points_opp, hits_opp = evaluate(net, net_opp)   # play against rl instance
+        points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)   # play against rl instance
 
         writer.add_scalar("eval/score_vs_random", points, update)
         writer.add_scalar("eval/score_vs_rl", points_opp, update)
         writer.add_scalar("eval/bid_accuracy_random", sum(hits)/len(hits), update)
         writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
+
+        writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
+
+        for k, v in metrics.items():
+            writer.add_scalar(f"{k}_random", v, update)
+        for k, v in metrics_opp.items():
+            writer.add_scalar(f"{k}_rl", v, update)
+
         writer.flush()
         print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
         print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")

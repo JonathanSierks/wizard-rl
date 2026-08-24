@@ -51,6 +51,18 @@ def encode(obs) -> np.ndarray:
     meta    = np.array([obs.round_nr, obs.n_players_bid_before_me if is_bid else len(obs.trick_so_far), is_bid], dtype=np.float32)
     return np.concatenate([hand, played, trump, trick, bids, meta])
 
+def ev_bid(q, valid_bids):
+    """q: [r+1] Wahrscheinlichkeiten ueber gewonnene Stiche (summiert zu 1).
+       Gibt das Gebot mit dem hoechsten Erwartungsnutzen zurueck."""
+    k = torch.arange(len(q), dtype=torch.float32)
+    best, best_ev = valid_bids[0], -1e9
+    for b in valid_bids:
+        hit  = q[b] * (20 + 10 * b)
+        miss = -10 * (q * (k - b).abs()).sum()      # bei k==b ist |k-b|=0, stoert nicht
+        ev = float(hit + miss)
+        if ev > best_ev:
+            best, best_ev = b, ev
+    return best
 
 class RLAgent:
     def __init__(self, net, greedy=False, debug=False):
@@ -58,23 +70,34 @@ class RLAgent:
         self.greedy = greedy
         self.debug = debug
         self.bid_logits_log = []
+        self.bid_compare_log = []
         self.pending = []
         self.buffer = []
         self.gamma = 1.0        # we choose NOT to to discount reward for actions further back in time
 
+
     def choose_bid(self, observation, valid_bids):
         enc = encode(observation)
         x = torch.from_numpy(enc)
+        r = observation.round_nr
 
         with torch.no_grad():
-            raw_bid_logits, _, _, _ = self.net(x)          # [21], noch ohne -inf
-
-        if self.debug:
-            self.bid_logits_log.append((raw_bid_logits.clone(), observation.round_nr))
+            raw_bid_logits, _, _, tricks_logits = self.net(x)          # [21], noch ohne -inf
 
         mask = torch.zeros(raw_bid_logits.shape[0], dtype=torch.bool)
         mask[valid_bids] = True
         bid_logits = raw_bid_logits.masked_fill(~mask, float('-inf'))
+
+        if self.debug:
+            q = torch.softmax(tricks_logits[:r+1], 0)
+            self.bid_compare_log.append((
+                r,
+                int(bid_logits.argmax()),        # was die Policy sagt
+                ev_bid(q, valid_bids),           # was die EV-Rechnung sagt
+                int(q.argmax()),                 # der Modus der Stichverteilung
+            ))
+            self.bid_logits_log.append((raw_bid_logits.clone(), observation.round_nr))
+
 
         dist = torch.distributions.Categorical(logits=bid_logits)
 
@@ -124,7 +147,7 @@ class RLAgent:
         n = len(self.pending)
         for t, (enc, action, mask, head) in enumerate(self.pending):
             G = (self.gamma ** (n - 1 - t)) * reward     # rückwärts diskontiert für jeweilige action aus pending
-            self.buffer.append((enc, action, mask, head, G, won_tricks))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
+            self.buffer.append((enc, action, mask, head, G, won_tricks, int(enc[314])))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
         self.pending = []
 
     def drain_buffer(self):
