@@ -84,34 +84,17 @@ class RLAgent:
         with torch.no_grad():
             raw_bid_logits, _, _, tricks_logits = self.net(x)          # [21], noch ohne -inf
 
-        mask = torch.zeros(raw_bid_logits.shape[0], dtype=torch.bool)
-        mask[valid_bids] = True
-        bid_logits = raw_bid_logits.masked_fill(~mask, float('-inf'))
+        q = torch.softmax(tricks_logits[:r+1], 0)
+        idx = ev_bid(q, valid_bids)
 
         if self.debug:
-            q = torch.softmax(tricks_logits[:r+1], 0)
-            self.bid_compare_log.append((
-                r,
-                int(bid_logits.argmax()),        # was die Policy sagt
-                ev_bid(q, valid_bids),           # was die EV-Rechnung sagt
-                int(q.argmax()),                 # der Modus der Stichverteilung
-            ))
-            self.bid_logits_log.append((raw_bid_logits.clone(), observation.round_nr))
+            mask = torch.zeros(21, dtype=torch.bool)
+            mask[valid_bids] = True
+            head_choice = int(raw_bid_logits.masked_fill(~mask, float('-inf')).argmax())
+            self.bid_compare_log.append((r, head_choice, idx, int(q.argmax())))
 
-
-        dist = torch.distributions.Categorical(logits=bid_logits)
-
-        # print bidding model states; only activate for jupyter debugging
-        # print("logits:", bid_logits)
-        # print("probs :", dist.probs)
-        # print("argmax:", dist.probs.argmax().item())
-        # print("mask  :", mask)
-
-        if self.greedy:
-            idx = int(bid_logits.argmax())
-        else:
-            idx = int(dist.sample())
-            self.pending.append((enc, idx, mask.numpy(), "bid"))
+        if not self.greedy:
+            self.pending.append((enc, idx, None, "bid"))
         return idx
     
     

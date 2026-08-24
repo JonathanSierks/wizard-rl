@@ -16,7 +16,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head_additional_metrics"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_active_tricks_head_1st_run"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -45,7 +45,7 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
         net_opp.eval()
 
     try:
-        totals, hits, rows, logits_log, cmp_log = [], [], [], [], []
+        totals, hits, rows, cmp_log = [], [], [], []
 
         with torch.no_grad():
             for _ in range(n_games):
@@ -66,11 +66,12 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
                 hits.append(rl.bid_hits / rl.rounds_played)
                 rows.extend(rl.round_log)
                 if collect:
-                    logits_log.extend(rl.agent.bid_logits_log)
                     cmp_log.extend(rl.agent.bid_compare_log)
 
-        # --- Bias pro Rundengroesse ---
         metrics = {}
+        bids20  = torch.tensor([])
+
+        # --- Gebotsqualitaet pro Rundengroesse (misst die gespielten Gebote) ---
         rr = torch.tensor([x[0] for x in rows])
         bd = torch.tensor([x[1] for x in rows])
         wn = torch.tensor([x[2] for x in rows])
@@ -82,23 +83,22 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
             metrics[f"bias/mae_r{size}"]  = d.abs().mean().item()
             metrics[f"acc/r{size}"]       = (d == 0).float().mean().item()
 
-        # --- Policy- vs EV-Gebot ---
+        # --- EV-Gebot vs. (ungenutzter) Bid-Head ---
         if cmp_log:
-            C = torch.tensor(cmp_log)                    # [n, 4]: r, policy, ev, mode
+            C = torch.tensor(cmp_log)          # [n, 4]: r, bid_head, ev, mode
+            bids20 = C[C[:, 0] == 20, 2]
             for size in (3, 8, 14, 20):
                 m = C[:, 0] == size
                 if m.sum() == 0: continue
-                metrics[f"bid_policy/mean_r{size}"] = C[m, 1].float().mean().item()
-                metrics[f"bid_policy/max_r{size}"]  = C[m, 1].max().item()
                 metrics[f"bid_ev/mean_r{size}"]     = C[m, 2].float().mean().item()
                 metrics[f"bid_ev/max_r{size}"]      = C[m, 2].max().item()
+                metrics[f"bid_head/mean_r{size}"]   = C[m, 1].float().mean().item()
+                metrics[f"bid_head/max_r{size}"]    = C[m, 1].max().item()
                 metrics[f"bid_ev/agree_r{size}"]    = (C[m, 1] == C[m, 2]).float().mean().item()
 
         score = sum(totals) / len(totals)
         if collect:
-            M = torch.stack([lg for lg, _ in logits_log])
-            rsizes = torch.tensor([x for _, x in logits_log])
-            return score, hits, metrics, M, rsizes
+            return score, hits, metrics, bids20
         return score, hits, metrics
 
     finally:
@@ -109,77 +109,82 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
 # pending = (enc, idx, mask.numpy(), "bid"/"play")  ; aktionen einen runde (je SPIELER) ohne G; wächst in länge über Runde
 # batch = concatinierter buffer aller spieler; bei 3 spielern wäre das len(batch) = 690; eig. zu wenig für einen step; wir wollen lieber 10 - 20 games sammeln. update: machen wir jetzt; ein batch hält 20 * buffer (=20 games)
 def reinforce_loss(net, batch):
-    losses = []
-    stats = {}
-    for head_name, head_idx in (("bid", 0), ("play", 1)):
+    """
+    Buffer-Tupel:
+        b[0]  enc         np.float32 (317,)   Observation zum Entscheidungszeitpunkt
+        b[1]  action      int                 gesampelter Index (nur bei "play" belegt)
+        b[2]  mask        np.bool (60,)       legale Karten (nur bei "play" belegt)
+        b[3]  head        str                 "bid" oder "play"
+        b[4]  G           float               Rundenreward
+        b[5]  won_tricks  int                 tatsaechlich gewonnene Stiche (CE-Label)
+        b[6]  round_nr    int                 Rundengroesse
+
+    Gebote entstehen seit dem Umbau aus der EV-Rechnung ueber den tricks_head,
+    nicht mehr aus einer gesampelten Policy. Bid-Transitions liefern deshalb
+    nur noch Value- und Tricks-Signal, keinen Policy-Gradienten.
+    """
+    losses, stats = [], {}
+
+    for head_name in ("bid", "play"):
         group = [b for b in batch if b[3] == head_name]
         if not group:
             continue
-        '''
-        b = (enc, action, mask, head, G)
-        #    b[0]  b[1]   b[2]  b[3]  b[4]
-
-        b[0]  np.ndarray float32, shape (317,)   # die encodierte Observation zum Zeitpunkt der Entscheidung
-        b[1]  int                                 # welcher Index gesampelt wurde, z.B. 5
-        b[2]  np.ndarray bool, shape (21,)/(60,)  # welche Indizes legal waren
-        b[3]  str, "bid" oder "play"
-        b[4]  float                               # der Return, den du beim Drainen zugewiesen hast
-        b[5] won_tricks
-        b[6] round_nr (=int(enc[314]))
-        '''    
-
-        G = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
-        adv = (G - G.mean()) / (G.std() + 1e-8)          # Baseline JE Kopf
-        #print(adv)
 
         enc = torch.from_numpy(np.stack([b[0] for b in group]))
-        act = torch.tensor([b[1] for b in group])
-        msk = torch.from_numpy(np.stack([b[2] for b in group])).bool()
+        G   = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
+        won = torch.tensor([b[5] for b in group])                       # [B] long
+        rs  = torch.tensor([b[6] for b in group])                       # [B]
 
         out = net(enc)
-        logits = out[head_idx].masked_fill(~msk, float('-inf'))
-        V = out[2]
-        tricks_logits = out[3]      # [B, 21]
+        V             = out[2]
+        tricks_logits = out[3]                                          # [B, 21]
 
-        adv = G - V.detach()
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
-        dist   = torch.distributions.Categorical(logits=logits)
-        loss_return  = -(dist.log_prob(act) * adv).mean()   # <- .mean() hier dazu → Skalar pro Kopf
-        beta = BETA_BID if head_name == "bid" else BETA_PLAY
-        loss_entropy = - beta * dist.entropy().mean()
-        loss_value = (V-G).pow(2).mean()
-        won = torch.tensor([b[5] for b in group])           # [B] long
-
-        # additionally mask tricks_logits
-        rs = torch.tensor([b[6] for b in group])                    # [B]
-        valid = torch.arange(21)[None, :] <= rs[:, None]            # [B, 21] bool
+        # --- Tricks-Head: CE gegen beobachtete Stichzahl -----------------
+        valid = torch.arange(21)[None, :] <= rs[:, None]                # [B, 21]
         tricks_logits = tricks_logits.masked_fill(~valid, float('-inf'))
         loss_tricks = F.cross_entropy(tricks_logits, won)
 
-        losses.append(loss_return + loss_entropy + loss_value + AUX * loss_tricks)           # 0-D
+        # --- Value-Head --------------------------------------------------
+        loss_value = (V - G).pow(2).mean()
 
-        real = msk.sum(dim=1) > 1                           # was there more than 1 option within the mask? only than we have a "real" decision and should measure
-        n_legal = msk.sum(dim=1).float()
+        # --- Policy-Gradient: nur fuer Kartenentscheidungen --------------
+        if head_name == "play":
+            act = torch.tensor([b[1] for b in group])
+            msk = torch.from_numpy(np.stack([b[2] for b in group])).bool()
+            logits = out[1].masked_fill(~msk, float('-inf'))
 
+            adv = G - V.detach()
+            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+            dist = torch.distributions.Categorical(logits=logits)
+            loss_return  = -(dist.log_prob(act) * adv).mean()
+            loss_entropy = -BETA_PLAY * dist.entropy().mean()
+
+            losses.append(loss_return + loss_entropy + loss_value + AUX * loss_tricks)
+
+            real    = msk.sum(dim=1) > 1        # echte Wahl, kein Zwangszug
+            n_legal = msk.sum(dim=1).float()
+            ent     = dist.entropy()
+
+            stats["play_loss_return"]   = loss_return.item()
+            stats["play_loss_entropy"]  = loss_entropy.item()
+            stats["play_entropy"]       = ent.mean().item()
+            stats["play_entropy_real"]  = ent[real].mean().item()
+            stats["play_entropy_norm"]  = (ent[real] / n_legal[real].log()).mean().item()
+            stats["play_logit_absmax"]  = logits[real][msk[real]].abs().max().item()
+            stats["play_n_decisions"]   = real.sum().item()
+        else:
+            losses.append(loss_value + AUX * loss_tricks)
+
+        # --- gemeinsame Statistik ----------------------------------------
         with torch.no_grad():
-            vc = np.corrcoef(V.detach().numpy(), G.numpy())[0, 1]
-        stats[f"{head_name}_value_corr"] = float(vc)
-
-        # pack values and send them out of function to log them in main train loop
-        stats[f"{head_name}_loss_return"] = loss_return.item()
-        stats[f"{head_name}_loss_entropy"] = loss_entropy.item()
-        stats[f"{head_name}_loss_value"] = loss_value.item()
-        stats[f"{head_name}_entropy_real"]      = dist.entropy()[real].mean().item()
-        stats[f"{head_name}_entropy"]      = dist.entropy().mean().item()
-        stats[f"{head_name}_logit_absmax"] = logits[real][msk[real]].abs().max().item()
-        stats[f"{head_name}_entropy_norm"] = (dist.entropy()[real] / n_legal[real].log()).mean().item()
-        stats[f"{head_name}_n_decisions"] = real.sum().item()
-        pred_tricks = tricks_logits.argmax(dim=1)
+            vc = np.corrcoef(V.numpy(), G.numpy())[0, 1]
+        stats[f"{head_name}_value_corr"]  = float(vc)
+        stats[f"{head_name}_loss_value"]  = loss_value.item()
         stats[f"{head_name}_loss_tricks"] = loss_tricks.item()
-        stats[f"tricks_mae_at_{head_name}"]  = (pred_tricks - won).abs().float().mean().item()
 
-        rs = torch.tensor([b[6] for b in group])
+        pred_tricks = tricks_logits.argmax(dim=1)
+        stats[f"tricks_mae_at_{head_name}"] = (pred_tricks - won).abs().float().mean().item()
         for r in (3, 8, 14, 20):
             m = rs == r
             if m.sum() > 0:
@@ -188,28 +193,20 @@ def reinforce_loss(net, batch):
 
     return torch.stack(losses).mean(), stats
 
-obs_dim = 60 + 60 + 180 + 5 + 9 + (1 + 1 + 1)       # dim = 317
-max_bid = 20
+obs_dim    = 60 + 60 + 180 + 5 + 9 + 3       # 317
+max_bid    = 20
 hidden_dim = 256
 
-net = WizNet(obs_dim, max_bid, hidden_dim)             # ONE architecture; different agents querry that architecture; game information is agent specific
+net = WizNet(obs_dim, max_bid, hidden_dim)
 net_opp = WizNet(obs_dim, max_bid, hidden_dim)
-net_opp.load_state_dict(torch.load("relevant_checkpoints/up_20260815_161453_6000.pt"), strict=False)
-
-#agents = [RLAgent(net) for _ in range(3)]   
-#players = [Player(f"p{i}", i, agents[i]) for i in range(3)]   # SELF-PLAY: derselbe Agent
-#player1, player2, player3 = players
-#game = Game()
-#game.add_player(player1)
-#game.add_player(player2)
-#game.add_player(player3)
-
+net_opp.load_state_dict(
+    torch.load("relevant_checkpoints/up_20260815_161453_6000.pt"), strict=False)
 
 opt = torch.optim.Adam(net.parameters(), lr=LR)
 
 for update in range(50_000):
 
-    # create a batch of 20 games to reduce impact of noise; 1 game = 690 Transitions, 20 games = 13.800k transitions; 1.200 bid transistions, 12.600 play transitions
+    # 20 Spiele pro Update; ~13.800 Transitions, davon ~1.200 bid / ~12.600 play
     batch = []
     for _ in range(20):
         agents = [RLAgent(net) for _ in range(3)]
@@ -217,68 +214,56 @@ for update in range(50_000):
         for i, ag in enumerate(agents):
             game.add_player(Player(f"p{i}", i, ag))
         game.start_sample()
-
         for ag in agents:
             batch.extend(ag.drain_buffer())
-    
+
     loss, stats = reinforce_loss(net, batch)
     opt.zero_grad()
     loss.backward()
 
-    g = torch.cat([p.grad.flatten() for p in net.bid_head.parameters()])
-    writer.add_scalar("grad/bid_head_norm", g.norm().item(), update)
+    for name, mod in (("play", net.card_head), ("value", net.value_head),
+                      ("tricks", net.tricks_head), ("trunk", net.layer2)):
+        g = torch.cat([p.grad.flatten() for p in mod.parameters()])
+        writer.add_scalar(f"grad/{name}_norm", g.norm().item(), update)
 
     opt.step()
 
+    # --- Tricks- und Value-Head: beide Transitionstypen ------------------
     for h in ("bid", "play"):
-        writer.add_scalar(f"loss/{h}_return",  stats[f"{h}_loss_return"],  update)
-        writer.add_scalar(f"loss/{h}_entropy", stats[f"{h}_loss_entropy"], update)
-        writer.add_scalar(f"loss/{h}_value",   stats[f"{h}_loss_value"],   update)
-        writer.add_scalar(f"value/{h}_corr",   stats[f"{h}_value_corr"],   update)
-        
-        writer.add_scalar(f"tricks/loss_tricks_at_{h}",   stats[f"{h}_loss_tricks"],   update)
-        writer.add_scalar(f"tricks/mae_at_{h}", stats[f"tricks_mae_at_{h}"], update)
+        writer.add_scalar(f"loss/{h}_value",            stats[f"{h}_loss_value"],  update)
+        writer.add_scalar(f"value/{h}_corr",            stats[f"{h}_value_corr"],  update)
+        writer.add_scalar(f"tricks/loss_tricks_at_{h}", stats[f"{h}_loss_tricks"], update)
+        writer.add_scalar(f"tricks/mae_at_{h}",         stats[f"tricks_mae_at_{h}"], update)
         for r in (3, 8, 14, 20):
             k = f"tricks_mae_r{r}_at_{h}"
             if k in stats:
                 writer.add_scalar(f"tricks/mae_r{r}_at_{h}", stats[k], update)
 
-    writer.add_scalar("policy/bid_entropy",             stats["bid_entropy"],           update)
-    writer.add_scalar("policy/bid_entropy_real",        stats["bid_entropy_real"],      update)
-    writer.add_scalar("policy/play_entropy",            stats["play_entropy"],          update)
-    writer.add_scalar("policy/play_entropy_real",       stats["play_entropy_real"],     update)
-    writer.add_scalar("policy/bid_logit_absmax",        stats["bid_logit_absmax"],      update)
-    writer.add_scalar("policy/play_logit_absmax",       stats["play_logit_absmax"],     update)
-    writer.add_scalar("policy/play_entropy_norm",       stats["play_entropy_norm"],     update)
-    writer.add_scalar("policy/bid_entropy_norm",        stats["bid_entropy_norm"],      update)
-    writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
-    writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
+    # --- Play-Policy: nur hier gibt es noch einen Policy-Gradienten ------
+    writer.add_scalar("loss/play_return",         stats["play_loss_return"],  update)
+    writer.add_scalar("loss/play_entropy",        stats["play_loss_entropy"], update)
+    writer.add_scalar("policy/play_entropy",      stats["play_entropy"],      update)
+    writer.add_scalar("policy/play_entropy_real", stats["play_entropy_real"], update)
+    writer.add_scalar("policy/play_entropy_norm", stats["play_entropy_norm"], update)
+    writer.add_scalar("policy/play_logit_absmax", stats["play_logit_absmax"], update)
+    writer.add_scalar("policy/play_n_decisions",  stats["play_n_decisions"],  update)
 
+    # ====================================================================
     if update % 50 == 0:
-        collect = (update % 250 == 0)        # Rang seltener, ist teurer
+        collect = (update % 250 == 0)
 
         if collect:
-            points, hits, metrics, M, rsizes = evaluate(net, n_games=1000, collect=True)         # rang: 1x rl vs. 2x random agents
-            writer.add_scalar("rank/bid_all_random", rank_ratio(M), update)
-            for r in (5, 10, 20):
-                writer.add_scalar(f"rank/bid_r{r}_random", rank_ratio(M[rsizes == r]), update)
-
-            bids20 = M[rsizes == 20].argmax(dim=1)
+            points, hits, metrics, bids20 = evaluate(net, n_games=1000, collect=True)
             writer.add_histogram("bids/round20", bids20, update)
-            writer.add_scalar("bids/mean_r20", bids20.float().mean().item(), update)
-            writer.add_scalar("bids/max_r20",  bids20.max().item(), update)
-
         else:
-            points, hits, metrics = evaluate(net)                  # play against random agents
+            points, hits, metrics = evaluate(net)
 
-        points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)   # play against rl instance
+        points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)
 
-        writer.add_scalar("eval/score_vs_random", points, update)
-        writer.add_scalar("eval/score_vs_rl", points_opp, update)
-        writer.add_scalar("eval/bid_accuracy_random", sum(hits)/len(hits), update)
-        writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
-
-        writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
+        writer.add_scalar("eval/score_vs_random",        points, update)
+        writer.add_scalar("eval/score_vs_rl",            points_opp, update)
+        writer.add_scalar("eval/bid_accuracy_random",    sum(hits)/len(hits), update)
+        writer.add_scalar("eval/bid_accuracy_rl",        sum(hits_opp)/len(hits_opp), update)
 
         for k, v in metrics.items():
             writer.add_scalar(f"{k}_random", v, update)
