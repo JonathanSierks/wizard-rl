@@ -3,6 +3,7 @@ from player import RLAgent, RandomAgent, Player
 from game import Game
 import torch
 import numpy as np
+import torch.nn.functional as F
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -15,7 +16,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_r**2_round_sampling"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
 
 torch.set_printoptions(precision=3, sci_mode=False)
@@ -25,6 +26,7 @@ BETA_BID = 0.05
 BETA_PLAY = 0.01
 LR = 3e-4
 G_SCALE = 50
+AUX = 0.1
 
 def rank_ratio(M):
     if M.shape[0] < 30:                  # zu wenige Zeilen → nicht aussagekräftig
@@ -122,6 +124,7 @@ def reinforce_loss(net, batch):
         b[2]  np.ndarray bool, shape (21,)/(60,)  # welche Indizes legal waren
         b[3]  str, "bid" oder "play"
         b[4]  float                               # der Return, den du beim Drainen zugewiesen hast
+        b[5] won_tricks
         '''    
 
         G = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
@@ -135,6 +138,7 @@ def reinforce_loss(net, batch):
         out = net(enc)
         logits = out[head_idx].masked_fill(~msk, float('-inf'))
         V = out[2]
+        tricks_logits = out[3]      # [B, 21]
 
         adv = G - V.detach()
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -144,8 +148,10 @@ def reinforce_loss(net, batch):
         beta = BETA_BID if head_name == "bid" else BETA_PLAY
         loss_entropy = - beta * dist.entropy().mean()
         loss_value = (V-G).pow(2).mean()
+        won = torch.tensor([b[5] for b in group])           # [B] long
+        loss_tricks = F.cross_entropy(tricks_logits, won)
 
-        losses.append(loss_return + loss_entropy + loss_value)           # 0-D
+        losses.append(loss_return + loss_entropy + loss_value + AUX * loss_tricks)           # 0-D
 
         real = msk.sum(dim=1) > 1                           # was there more than 1 option within the mask? only than we have a "real" decision and should measure
         n_legal = msk.sum(dim=1).float()
@@ -163,6 +169,9 @@ def reinforce_loss(net, batch):
         stats[f"{head_name}_logit_absmax"] = logits[real][msk[real]].abs().max().item()
         stats[f"{head_name}_entropy_norm"] = (dist.entropy()[real] / n_legal[real].log()).mean().item()
         stats[f"{head_name}_n_decisions"] = real.sum().item()
+        pred_tricks = tricks_logits.argmax(dim=1)
+        stats[f"{head_name}_loss_tricks"] = loss_tricks.item()
+        stats[f"tricks_mae_at_{head_name}"]  = (pred_tricks - won).abs().float().mean().item()
 
     return torch.stack(losses).mean(), stats
 
@@ -181,6 +190,9 @@ net_opp.load_state_dict(torch.load("relevant_checkpoints/up_20260815_161453_6000
 #game.add_player(player1)
 #game.add_player(player2)
 #game.add_player(player3)
+
+
+
 
 opt = torch.optim.Adam(net.parameters(), lr=LR)
 
@@ -206,11 +218,17 @@ for update in range(50_000):
     writer.add_scalar("grad/bid_head_norm", g.norm().item(), update)
 
     opt.step()
+
+
+
+
     for h in ("bid", "play"):
         writer.add_scalar(f"loss/{h}_return",  stats[f"{h}_loss_return"],  update)
         writer.add_scalar(f"loss/{h}_entropy", stats[f"{h}_loss_entropy"], update)
         writer.add_scalar(f"loss/{h}_value",   stats[f"{h}_loss_value"],   update)
         writer.add_scalar(f"value/{h}_corr",   stats[f"{h}_value_corr"],   update)
+        writer.add_scalar(f"loss/{h}_tricks",   stats[f"{h}_loss_tricks"],   update)
+        writer.add_scalar(f"loss/tricks_mae_at_{h}",   stats[f"tricks_mae_at_{h}"],   update)
 
     writer.add_scalar("policy/bid_entropy",             stats["bid_entropy"],           update)
     writer.add_scalar("policy/bid_entropy_real",        stats["bid_entropy_real"],      update)
@@ -221,7 +239,8 @@ for update in range(50_000):
     writer.add_scalar("policy/play_entropy_norm",       stats["play_entropy_norm"],     update)
     writer.add_scalar("policy/bid_entropy_norm",        stats["bid_entropy_norm"],      update)
     writer.add_scalar("policy/bid_n_decisions",         stats["bid_n_decisions"],       update)
-    writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)    
+    writer.add_scalar("policy/play_n_decisions",        stats["play_n_decisions"],      update)
+
 
     if update % 50 == 0:
         collect = (update % 250 == 0)        # Rang seltener, ist teurer

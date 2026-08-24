@@ -67,14 +67,14 @@ class RLAgent:
         x = torch.from_numpy(enc)
 
         with torch.no_grad():
-            raw_logits, _, _ = self.net(x)          # [21], noch ohne -inf
+            raw_bid_logits, _, _, _ = self.net(x)          # [21], noch ohne -inf
 
         if self.debug:
-            self.bid_logits_log.append((raw_logits.clone(), observation.round_nr))
+            self.bid_logits_log.append((raw_bid_logits.clone(), observation.round_nr))
 
-        mask = torch.zeros(raw_logits.shape[0], dtype=torch.bool)
+        mask = torch.zeros(raw_bid_logits.shape[0], dtype=torch.bool)
         mask[valid_bids] = True
-        bid_logits = raw_logits.masked_fill(~mask, float('-inf'))
+        bid_logits = raw_bid_logits.masked_fill(~mask, float('-inf'))
 
         dist = torch.distributions.Categorical(logits=bid_logits)
 
@@ -97,10 +97,10 @@ class RLAgent:
         x = torch.from_numpy(enc)
 
         with torch.no_grad():                       # Inference — kein Gradient nötig
-            _, play_logits, _ = self.net(x)             # net(x), nicht net.forward(x)
+            _, raw_play_logits, _, _ = self.net(x)             # net(x), nicht net.forward(x)
 
         mask = torch.from_numpy(multi_hot(legal_cards)).bool()
-        play_logits = play_logits.masked_fill(~mask, float('-inf'))  
+        play_logits = raw_play_logits.masked_fill(~mask, float('-inf'))  
 
         dist = torch.distributions.Categorical(logits=play_logits)
 
@@ -120,11 +120,11 @@ class RLAgent:
         return Card(color=COLORS[idx // 15], value=idx % 15) 
 
     # calculate reward back over all actions of 1 round to obtain G's
-    def observe_reward(self, reward):
+    def observe_reward(self, reward, won_tricks=0):
         n = len(self.pending)
         for t, (enc, action, mask, head) in enumerate(self.pending):
             G = (self.gamma ** (n - 1 - t)) * reward     # rückwärts diskontiert für jeweilige action aus pending
-            self.buffer.append((enc, action, mask, head, G))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
+            self.buffer.append((enc, action, mask, head, G, won_tricks))        # buffer speichert observation tuple (enc_obs, action, mask, head, G) jeder runde, inkl. discontinued reward G
         self.pending = []
 
     def drain_buffer(self):
@@ -139,7 +139,7 @@ class RandomAgent:
     def choose_card(self, observation, legal_cards: list[Card]):
         return random.choice(legal_cards)
     
-    def observe_reward(self, reward):
+    def observe_reward(self, reward, won_tricks=0):
         pass
 
 
@@ -174,7 +174,7 @@ class HumanAgent:
                 return obs.hand[i]
             print("Karte nicht spielbar (Farbzwang).")
 
-    def observe_reward(self, reward):
+    def observe_reward(self, reward, won_tricks=0):
         pass
 
 
@@ -204,7 +204,7 @@ class Player:
         return card
     
     def observe_reward(self, reward):
-        self.agent.observe_reward(reward)
+        self.agent.observe_reward(reward, self.won_tricks)
 
 
 
