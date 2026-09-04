@@ -1,12 +1,12 @@
 import random
-from cards import Card, COLORS, TRUMP
 import numpy as np
-from observations import BidObservation, PlayObservation
 import torch
-import argparse
 from termcolor import colored
 
-import random
+from cards import Card, COLORS, TRUMP
+from observations import BidObservation, PlayObservation
+from heuristic_agent import card_strength, hand_strength, _current_best, _beats
+
 SEED = 0
 random.seed(SEED)
 np.random.seed(SEED)
@@ -164,6 +164,58 @@ class RandomAgent:
     
     def observe_reward(self, reward, won_tricks=0):
         pass
+
+class HeuristicAgent:
+    """Deterministic reference opponent. Same interface as RLAgent."""
+
+    def __init__(self):
+        self.buffer = []          # never filled; kept for interface compatibility
+
+    # -- bidding ------------------------------------------------------------
+    def choose_bid(self, observation, valid_bids):
+        est = hand_strength(observation.hand, observation.trump)
+        target = int(round(est))
+        # nearest legal bid, preferring the lower one on ties
+        return min(valid_bids, key=lambda b: (abs(b - target), b))
+
+    # -- playing ------------------------------------------------------------
+    def choose_card(self, observation, legal_cards):
+        trump = observation.trump
+        trick = list(observation.trick_so_far)
+        best, lead = _current_best(trick, trump)
+
+        called, won = observation.bids_and_wins[0]
+        need = (called or 0) - won
+
+        def weakest_first(c):                     # fixed tie-break: keeps ties deterministic
+            return card_strength(c, trump), c.value
+
+        if best is None:
+            # leading: no card to beat yet, so "cheapest winner" is meaningless.
+            # Lead the strongest card when tricks are still needed, the weakest
+            # one otherwise.
+            return (max if need > 0 else min)(legal_cards, key=weakest_first)
+
+        winners = [c for c in legal_cards if _beats(c, best, trump, lead)]
+
+        if need > 0 and winners:
+            # win as cheaply as possible
+            return min(winners, key=weakest_first)
+
+        if need <= 0:
+            losers = [c for c in legal_cards if c not in winners]
+            pool = losers if losers else legal_cards
+            return min(pool, key=weakest_first)
+
+        # need > 0 but cannot win: discard the weakest card
+        return min(legal_cards, key=weakest_first)
+
+    # -- interface ----------------------------------------------------------
+    def observe_reward(self, reward, won_tricks=0):
+        pass
+
+    def drain_buffer(self):
+        return []
 
 
 class HumanAgent:

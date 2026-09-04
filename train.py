@@ -1,5 +1,5 @@
 from model import WizNet
-from player import RLAgent, RandomAgent, Player
+from player import RLAgent, RandomAgent, HeuristicAgent, Player
 from game import Game
 import torch
 import numpy as np
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+import os
 
 import random
 SEED = 0
@@ -15,9 +16,14 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
+rng = random.Random(SEED + 10_000) 
+
 run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head_additional_metrics"
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_tricks_head_heuristic_baseline2"
 writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
+
+CKPT_DIR = "checkpoints"
+os.makedirs(CKPT_DIR, exist_ok=True)   # git cannot track the empty dir, so create it here
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -27,6 +33,7 @@ BETA_PLAY = 0.01
 LR = 3e-4
 G_SCALE = 50
 AUX = 0.1
+P_HEUR = 0.4
 
 def rank_ratio(M):
     if M.shape[0] < 30:                  # zu wenige Zeilen → nicht aussagekräftig
@@ -35,7 +42,14 @@ def rank_ratio(M):
     s = torch.linalg.svdvals(M)
     return (s[0] / s.sum()).item()
 
-def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
+def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42, opponent=None):
+    """Score `net` against a table of two opponents.
+
+    opponent="heuristic" -> the rule-based reference agent (fixed strength,
+                            deterministic, never trained against)
+    net_opp given         -> a frozen learned checkpoint
+    otherwise             -> random agents
+    """
     py_state = random.getstate()
     th_state = torch.get_rng_state()
     random.seed(eval_seed); torch.manual_seed(eval_seed)
@@ -50,7 +64,10 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42):
         with torch.no_grad():
             for _ in range(n_games):
                 rl = Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))
-                if net_opp is not None:
+                if opponent == "heuristic":
+                    others = [Player("h1", 1, HeuristicAgent()),
+                              Player("h2", 2, HeuristicAgent())]
+                elif net_opp is not None:
                     others = [Player("o1", 1, RLAgent(net_opp, greedy=True)),
                               Player("o2", 2, RLAgent(net_opp, greedy=True))]
                 else:
@@ -188,6 +205,8 @@ def reinforce_loss(net, batch):
 
     return torch.stack(losses).mean(), stats
 
+
+
 obs_dim = 60 + 60 + 180 + 5 + 9 + (1 + 1 + 1)       # dim = 317
 max_bid = 20
 hidden_dim = 256
@@ -209,17 +228,24 @@ opt = torch.optim.Adam(net.parameters(), lr=LR)
 
 for update in range(50_000):
 
-    # create a batch of 20 games to reduce impact of noise; 1 game = 690 Transitions, 20 games = 13.800k transitions; 1.200 bid transistions, 12.600 play transitions
+    # 27 games per update: with P_HEUR of the opponents being heuristics, only
+    # the RL agents contribute transitions, so more games are needed to keep the
+    # batch at roughly the 13.800 transitions that 20 pure self-play games gave.
     batch = []
-    for _ in range(20):
-        agents = [RLAgent(net) for _ in range(3)]
+    for _ in range(27):
+        others = [HeuristicAgent() if rng.random() < P_HEUR else RLAgent(net)
+             for _ in range(2)]
+        rl = RLAgent(net)
+        agents = [rl] + others
+        
         game = Game()
         for i, ag in enumerate(agents):
             game.add_player(Player(f"p{i}", i, ag))
         game.start_sample()
 
         for ag in agents:
-            batch.extend(ag.drain_buffer())
+            if isinstance(ag, RLAgent):
+                batch.extend(ag.drain_buffer())
     
     loss, stats = reinforce_loss(net, batch)
     opt.zero_grad()
@@ -273,21 +299,30 @@ for update in range(50_000):
 
         points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)   # play against rl instance
 
+        # The heuristic is a fixed reference axis: it is never trained against,
+        # so this score stays comparable across runs — unlike score_vs_rl,
+        # which drifts with whichever checkpoint net_opp happens to be.
+        # Deterministic opponents also mean lower variance, hence fewer games.
+        points_heu, hits_heu, metrics_heu = evaluate(net, n_games=100, opponent="heuristic")
+
         writer.add_scalar("eval/score_vs_random", points, update)
         writer.add_scalar("eval/score_vs_rl", points_opp, update)
+        writer.add_scalar("eval/score_vs_heuristic", points_heu, update)
         writer.add_scalar("eval/bid_accuracy_random", sum(hits)/len(hits), update)
         writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
-
-        writer.add_scalar("eval/bid_accuracy_rl", sum(hits_opp)/len(hits_opp), update)
+        writer.add_scalar("eval/bid_accuracy_heuristic", sum(hits_heu)/len(hits_heu), update)
 
         for k, v in metrics.items():
             writer.add_scalar(f"{k}_random", v, update)
         for k, v in metrics_opp.items():
             writer.add_scalar(f"{k}_rl", v, update)
+        for k, v in metrics_heu.items():
+            writer.add_scalar(f"{k}_heuristic", v, update)
 
         writer.flush()
         print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
         print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")
+        print(f"up {update}: {points_heu:.1f} Points & bid=won {sum(hits_heu)/len(hits_heu):.3f} [HEURISTIC]")
 
     if update % 250 == 0:
-        torch.save(net.state_dict(), f"checkpoints/up_{run_time}_{update}.pt")
+        torch.save(net.state_dict(), os.path.join(CKPT_DIR, f"up_{run_time}_{update}.pt"))

@@ -86,7 +86,9 @@ ENV/
 /site
 
 # mypy
-.mypy_cache/checkpoints/
+.mypy_cache/
+
+checkpoints/
 rl_runs/
 __pycache__/
 *.pt

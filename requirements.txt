@@ -2,3 +2,5 @@ torch
 numpy
 termcolor
 tensorboard
+pytest
+ipykernel
