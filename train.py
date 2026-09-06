@@ -11,21 +11,21 @@ from datetime import datetime
 import os
 
 import random
-SEED = 0
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-
-rng = random.Random(SEED + 10_000) 
-
-run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_ev_bidding_heuristic_baseline"
-writer = SummaryWriter(log_dir=f"/home/ipv577/rl_runs/{run_name}")
-
-CKPT_DIR = "checkpoints"
-os.makedirs(CKPT_DIR, exist_ok=True)   # git cannot track the empty dir, so create it here
 
 torch.set_printoptions(precision=3, sci_mode=False)
+
+# --- run setup -------------------------------------------------------------
+SEED       = 0
+RUN_SUFFIX = "_ev_bidding_heuristic_baseline"
+UPDATES    = 50_000
+LOG_ROOT   = "/home/ipv577/rl_runs"
+CKPT_DIR   = "checkpoints"
+
+# --- architecture ----------------------------------------------------------
+OBS_DIM    = 60 + 60 + 180 + 5 + 9 + 3       # 317
+MAX_BID    = 20
+HIDDEN_DIM = 256
+OPP_CKPT   = "relevant_checkpoints/up_20260815_161453_6000.pt"
 
 # hyperparams
 BETA_BID = 0.05
@@ -210,104 +210,123 @@ def reinforce_loss(net, batch):
 
     return torch.stack(losses).mean(), stats
 
-obs_dim    = 60 + 60 + 180 + 5 + 9 + 3       # 317
-max_bid    = 20
-hidden_dim = 256
+def train(updates=UPDATES, seed=SEED, run_suffix=RUN_SUFFIX):
+    """Run the training loop and return the trained network.
 
-net = WizNet(obs_dim, max_bid, hidden_dim)
-net_opp = WizNet(obs_dim, max_bid, hidden_dim)
-net_opp.load_state_dict(
-    torch.load("relevant_checkpoints/up_20260815_161453_6000.pt"), strict=False)
+    Everything that used to happen at import time lives here now, so the
+    module can be imported (from a notebook, a test, an analysis script)
+    without starting a run.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    rng = random.Random(seed + 10_000)
 
-opt = torch.optim.Adam(net.parameters(), lr=LR)
+    run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = run_time + run_suffix
+    writer = SummaryWriter(log_dir=f"{LOG_ROOT}/{run_name}")
+    os.makedirs(CKPT_DIR, exist_ok=True)   # git cannot track the empty dir
 
-for update in range(50_000):
+    net = WizNet(OBS_DIM, MAX_BID, HIDDEN_DIM)
+    net_opp = WizNet(OBS_DIM, MAX_BID, HIDDEN_DIM)
+    net_opp.load_state_dict(torch.load(OPP_CKPT), strict=False)
 
-    # 27 games per update: with P_HEUR of the opponents being heuristics, only
-    # the RL agents contribute transitions, so more games are needed to keep the
-    # batch at roughly the 13.800 transitions that 20 pure self-play games gave.
-    batch = []
-    for _ in range(27):
-        others = [HeuristicAgent() if rng.random() < P_HEUR else RLAgent(net)
-             for _ in range(2)]
-        rl = RLAgent(net)
-        agents = [rl] + others
+    opt = torch.optim.Adam(net.parameters(), lr=LR)
+
+    for update in range(updates):
+
+        # 27 games per update: with P_HEUR of the opponents being heuristics, only
+        # the RL agents contribute transitions, so more games are needed to keep the
+        # batch at roughly the 13.800 transitions that 20 pure self-play games gave.
+        batch = []
+        for _ in range(27):
+            others = [HeuristicAgent() if rng.random() < P_HEUR else RLAgent(net)
+                 for _ in range(2)]
+            rl = RLAgent(net)
+            agents = [rl] + others
         
-        game = Game()
-        for i, ag in enumerate(agents):
-            game.add_player(Player(f"p{i}", i, ag))
-        game.start_sample()
-        for ag in agents:
-            if isinstance(ag, RLAgent):     # heuristics carry no transitions
-                batch.extend(ag.drain_buffer())
+            game = Game()
+            for i, ag in enumerate(agents):
+                game.add_player(Player(f"p{i}", i, ag))
+            game.start_sample()
+            for ag in agents:
+                if isinstance(ag, RLAgent):     # heuristics carry no transitions
+                    batch.extend(ag.drain_buffer())
 
-    loss, stats = reinforce_loss(net, batch)
-    opt.zero_grad()
-    loss.backward()
+        loss, stats = reinforce_loss(net, batch)
+        opt.zero_grad()
+        loss.backward()
 
-    for name, mod in (("play", net.card_head), ("value", net.value_head),
-                      ("tricks", net.tricks_head), ("trunk", net.layer2)):
-        g = torch.cat([p.grad.flatten() for p in mod.parameters()])
-        writer.add_scalar(f"grad/{name}_norm", g.norm().item(), update)
+        for name, mod in (("play", net.card_head), ("value", net.value_head),
+                          ("tricks", net.tricks_head), ("trunk", net.layer2)):
+            g = torch.cat([p.grad.flatten() for p in mod.parameters()])
+            writer.add_scalar(f"grad/{name}_norm", g.norm().item(), update)
 
-    opt.step()
+        opt.step()
 
-    # --- Tricks- und Value-Head: beide Transitionstypen ------------------
-    for h in ("bid", "play"):
-        writer.add_scalar(f"loss/{h}_value",            stats[f"{h}_loss_value"],  update)
-        writer.add_scalar(f"value/{h}_corr",            stats[f"{h}_value_corr"],  update)
-        writer.add_scalar(f"tricks/loss_tricks_at_{h}", stats[f"{h}_loss_tricks"], update)
-        writer.add_scalar(f"tricks/mae_at_{h}",         stats[f"tricks_mae_at_{h}"], update)
-        for r in (3, 8, 14, 20):
-            k = f"tricks_mae_r{r}_at_{h}"
-            if k in stats:
-                writer.add_scalar(f"tricks/mae_r{r}_at_{h}", stats[k], update)
+        # --- Tricks- und Value-Head: beide Transitionstypen ------------------
+        for h in ("bid", "play"):
+            writer.add_scalar(f"loss/{h}_value",            stats[f"{h}_loss_value"],  update)
+            writer.add_scalar(f"value/{h}_corr",            stats[f"{h}_value_corr"],  update)
+            writer.add_scalar(f"tricks/loss_tricks_at_{h}", stats[f"{h}_loss_tricks"], update)
+            writer.add_scalar(f"tricks/mae_at_{h}",         stats[f"tricks_mae_at_{h}"], update)
+            for r in (3, 8, 14, 20):
+                k = f"tricks_mae_r{r}_at_{h}"
+                if k in stats:
+                    writer.add_scalar(f"tricks/mae_r{r}_at_{h}", stats[k], update)
 
-    # --- Play-Policy: nur hier gibt es noch einen Policy-Gradienten ------
-    writer.add_scalar("loss/play_return",         stats["play_loss_return"],  update)
-    writer.add_scalar("loss/play_entropy",        stats["play_loss_entropy"], update)
-    writer.add_scalar("policy/play_entropy",      stats["play_entropy"],      update)
-    writer.add_scalar("policy/play_entropy_real", stats["play_entropy_real"], update)
-    writer.add_scalar("policy/play_entropy_norm", stats["play_entropy_norm"], update)
-    writer.add_scalar("policy/play_logit_absmax", stats["play_logit_absmax"], update)
-    writer.add_scalar("policy/play_n_decisions",  stats["play_n_decisions"],  update)
+        # --- Play-Policy: nur hier gibt es noch einen Policy-Gradienten ------
+        writer.add_scalar("loss/play_return",         stats["play_loss_return"],  update)
+        writer.add_scalar("loss/play_entropy",        stats["play_loss_entropy"], update)
+        writer.add_scalar("policy/play_entropy",      stats["play_entropy"],      update)
+        writer.add_scalar("policy/play_entropy_real", stats["play_entropy_real"], update)
+        writer.add_scalar("policy/play_entropy_norm", stats["play_entropy_norm"], update)
+        writer.add_scalar("policy/play_logit_absmax", stats["play_logit_absmax"], update)
+        writer.add_scalar("policy/play_n_decisions",  stats["play_n_decisions"],  update)
 
-    # ====================================================================
-    if update % 50 == 0:
-        collect = (update % 250 == 0)
+        # ====================================================================
+        if update % 50 == 0:
+            collect = (update % 250 == 0)
 
-        if collect:
-            points, hits, metrics, bids20 = evaluate(net, n_games=1000, collect=True)
-            writer.add_histogram("bids/round20", bids20, update)
-        else:
-            points, hits, metrics = evaluate(net)
+            if collect:
+                points, hits, metrics, bids20 = evaluate(net, n_games=1000, collect=True)
+                writer.add_histogram("bids/round20", bids20, update)
+            else:
+                points, hits, metrics = evaluate(net)
 
-        points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)
+            points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)
 
-        # Heuristics are now also training opponents (P_HEUR), so this score
-        # is no longer a clean generalisation measure -- score_vs_random is the
-        # axis that is never trained against. Kept because it is deterministic
-        # and therefore low-variance, hence fewer games.
-        points_heu, hits_heu, metrics_heu = evaluate(net, n_games=100, opponent="heuristic")
+            # Heuristics are now also training opponents (P_HEUR), so this score
+            # is no longer a clean generalisation measure -- score_vs_random is the
+            # axis that is never trained against. Kept because it is deterministic
+            # and therefore low-variance, hence fewer games.
+            points_heu, hits_heu, metrics_heu = evaluate(net, n_games=100, opponent="heuristic")
 
-        writer.add_scalar("eval/score_vs_random",         points, update)
-        writer.add_scalar("eval/score_vs_rl",             points_opp, update)
-        writer.add_scalar("eval/score_vs_heuristic",      points_heu, update)
-        writer.add_scalar("eval/bid_accuracy_random",     sum(hits)/len(hits), update)
-        writer.add_scalar("eval/bid_accuracy_rl",         sum(hits_opp)/len(hits_opp), update)
-        writer.add_scalar("eval/bid_accuracy_heuristic",  sum(hits_heu)/len(hits_heu), update)
+            writer.add_scalar("eval/score_vs_random",         points, update)
+            writer.add_scalar("eval/score_vs_rl",             points_opp, update)
+            writer.add_scalar("eval/score_vs_heuristic",      points_heu, update)
+            writer.add_scalar("eval/bid_accuracy_random",     sum(hits)/len(hits), update)
+            writer.add_scalar("eval/bid_accuracy_rl",         sum(hits_opp)/len(hits_opp), update)
+            writer.add_scalar("eval/bid_accuracy_heuristic",  sum(hits_heu)/len(hits_heu), update)
 
-        for k, v in metrics.items():
-            writer.add_scalar(f"{k}_random", v, update)
-        for k, v in metrics_opp.items():
-            writer.add_scalar(f"{k}_rl", v, update)
-        for k, v in metrics_heu.items():
-            writer.add_scalar(f"{k}_heuristic", v, update)
+            for k, v in metrics.items():
+                writer.add_scalar(f"{k}_random", v, update)
+            for k, v in metrics_opp.items():
+                writer.add_scalar(f"{k}_rl", v, update)
+            for k, v in metrics_heu.items():
+                writer.add_scalar(f"{k}_heuristic", v, update)
 
-        writer.flush()
-        print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
-        print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")
-        print(f"up {update}: {points_heu:.1f} Points & bid=won {sum(hits_heu)/len(hits_heu):.3f} [HEURISTIC]")
+            writer.flush()
+            print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
+            print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")
+            print(f"up {update}: {points_heu:.1f} Points & bid=won {sum(hits_heu)/len(hits_heu):.3f} [HEURISTIC]")
 
-    if update % 250 == 0:
-        torch.save(net.state_dict(), os.path.join(CKPT_DIR, f"up_{run_time}_{update}.pt"))
+        if update % 250 == 0:
+            torch.save(net.state_dict(), os.path.join(CKPT_DIR, f"up_{run_time}_{update}.pt"))
+
+    writer.close()
+    return net
+
+
+if __name__ == "__main__":
+    train()
