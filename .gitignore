@@ -93,3 +93,4 @@ rl_runs/
 __pycache__/
 *.pt
 !relevant_checkpoints/*.pt
+run_logs/

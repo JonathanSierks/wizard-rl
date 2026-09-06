@@ -19,7 +19,7 @@ import random
 
 from game import round_weights, sample_round_sizes
 from player import RLAgent
-from train import Config
+from train import Config, EXPERIMENTS, main
 
 
 # --- importing train must not start a run -----------------------------------
@@ -81,6 +81,44 @@ def test_ev_mode_records_no_bid_mask():
     # In "ev" mode the bid is analytic, so there is no action distribution and
     # no mask to store; reinforce_loss relies on that to skip the policy term.
     assert "bid" not in Config(bid_mode="ev").policy_heads()
+
+
+# --- the ablation registry --------------------------------------------------
+
+def test_every_experiment_is_named_after_its_key():
+    for key, cfg in EXPERIMENTS.items():
+        assert cfg.name == key, f"EXPERIMENTS[{key!r}] is named {cfg.name!r}"
+
+
+def test_ablation_holds_heuristic_opponents_out():
+    # A-E predate heuristic opponents; mixing them in would add a variable
+    # that is not part of the story. F is that variable on its own.
+    for key in "ABCDE":
+        assert EXPERIMENTS[key].p_heur == 0.0, f"{key} would train against heuristics"
+    assert EXPERIMENTS["F"].p_heur > 0.0
+
+
+def test_ablation_is_additive():
+    # Each configuration differs from its predecessor in exactly one axis.
+    axes = lambda c: (c.bid_mode, c.use_value_baseline, c.round_weights_exp, c.aux)
+    order = [EXPERIMENTS[k] for k in "ABCDE"]
+    for prev, cur in zip(order, order[1:]):
+        diff = sum(a != b for a, b in zip(axes(prev), axes(cur)))
+        assert diff == 1, f"{prev.name} -> {cur.name} changes {diff} axes, not 1"
+
+
+def test_experiments_write_to_distinct_run_directories():
+    suffixes = {c.run_suffix for c in EXPERIMENTS.values()}
+    assert len(suffixes) == len(EXPERIMENTS)
+
+
+def test_cli_rejects_an_unknown_configuration():
+    try:
+        main(["--config", "Z"])
+    except SystemExit as e:
+        assert e.code != 0
+    else:
+        raise AssertionError("an unknown configuration should not be accepted")
 
 
 if __name__ == "__main__":

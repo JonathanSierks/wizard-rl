@@ -8,7 +8,9 @@ import torch.nn.functional as F
 
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, replace
+import argparse
+import json
 import os
 
 import random
@@ -17,6 +19,7 @@ torch.set_printoptions(precision=3, sci_mode=False)
 
 LOG_ROOT   = "/home/ipv577/rl_runs"
 CKPT_DIR   = "checkpoints"
+RESULT_DIR = "results"
 OPP_CKPT   = "relevant_checkpoints/up_20260815_161453_6000.pt"
 
 
@@ -301,6 +304,9 @@ def train(cfg=None, updates=None):
     run_name = run_time + cfg.run_suffix
     writer = SummaryWriter(log_dir=f"{LOG_ROOT}/{run_name}")
     os.makedirs(CKPT_DIR, exist_ok=True)   # git cannot track the empty dir
+    os.makedirs(RESULT_DIR, exist_ok=True)
+    result_path = os.path.join(RESULT_DIR, f"{cfg.name}.json")
+    history, histograms = [], {}
 
     net = WizNet(cfg.obs_dim, cfg.max_bid, cfg.hidden_dim)
     net_opp = WizNet(cfg.obs_dim, cfg.max_bid, cfg.hidden_dim)
@@ -399,6 +405,28 @@ def train(cfg=None, updates=None):
             for k, v in metrics.items():
                 writer.add_scalar(f"{k}_random", v, update)
 
+            # --- machine-readable history, so figures can be rebuilt from
+            # numbers instead of TensorBoard screenshots. Rewritten at every
+            # eval point, so a killed run still leaves usable data.
+            row = {"update": update,
+                   "score_vs_random":    points,
+                   "score_vs_rl":        points_opp,
+                   "score_vs_heuristic": points_heu,
+                   "bid_accuracy_random":    sum(hits)/len(hits),
+                   "bid_accuracy_rl":        sum(hits_opp)/len(hits_opp),
+                   "bid_accuracy_heuristic": sum(hits_heu)/len(hits_heu)}
+            row.update({k.replace("/", "_"): v for k, v in metrics.items()})
+            for h in ("bid", "play"):
+                k = f"tricks_mae_r20_at_{h}"
+                if k in stats:
+                    row[k] = stats[k]
+            history.append(row)
+            if collect:
+                histograms[str(update)] = [int(b) for b in bids20.tolist()]
+            with open(result_path, "w") as f:
+                json.dump({"config": asdict(cfg), "run_name": run_name,
+                           "history": history, "bids_r20": histograms}, f, indent=1)
+
             writer.flush()
             print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
             print(f"up {update}: {points_opp:.1f} Points & bid=won {sum(hits_opp)/len(hits_opp):.3f} [RL]")
@@ -411,5 +439,59 @@ def train(cfg=None, updates=None):
     return net
 
 
+# ---------------------------------------------------------------------------
+# The ablation. Each configuration adds exactly one axis to the one before it,
+# so a difference in the result is attributable. p_heur is 0 throughout: the
+# A-E story predates heuristic opponents, mixing them in would add a variable
+# that is not part of it. Heuristics as training opponents are experiment F.
+# ---------------------------------------------------------------------------
+_BASE = dict(p_heur=0.0, updates=3000, seed=0)
+
+EXPERIMENTS = {
+    "A": Config(name="A", bid_mode="policy", use_value_baseline=False,
+                round_weights_exp=0, aux=0.0, **_BASE),
+    "B": Config(name="B", bid_mode="policy", use_value_baseline=True,
+                round_weights_exp=0, aux=0.0, **_BASE),
+    "C": Config(name="C", bid_mode="policy", use_value_baseline=True,
+                round_weights_exp=2, aux=0.0, **_BASE),
+    "D": Config(name="D", bid_mode="policy", use_value_baseline=True,
+                round_weights_exp=2, aux=0.1, **_BASE),
+    "E": Config(name="E", bid_mode="ev",     use_value_baseline=True,
+                round_weights_exp=2, aux=0.1, **_BASE),
+    # Experiment F: does training against the heuristic help? Same as E
+    # otherwise, so the difference is the opponent mix and nothing else.
+    "F": Config(name="F", bid_mode="ev",     use_value_baseline=True,
+                round_weights_exp=2, aux=0.1,
+                p_heur=0.4, updates=3000, seed=0),
+    "default": Config(name="default"),
+}
+
+
+def load_results(name, result_dir=RESULT_DIR):
+    """Read one run's result file. Returns None if it has not started yet."""
+    path = os.path.join(result_dir, f"{name}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description="Run one Wizard RL experiment.")
+    p.add_argument("--config", default="default", choices=sorted(EXPERIMENTS),
+                   help="which configuration of the ablation to run")
+    p.add_argument("--updates", type=int, default=None,
+                   help="override the number of updates (useful for smoke runs)")
+    p.add_argument("--seed", type=int, default=None,
+                   help="override the seed, e.g. to repeat a configuration")
+    a = p.parse_args(argv)
+
+    cfg = EXPERIMENTS[a.config]
+    if a.seed is not None:
+        cfg = replace(cfg, seed=a.seed, name=f"{cfg.name}_seed{a.seed}")
+    print(f"running {cfg.name}: {cfg.run_suffix}")
+    return train(cfg, updates=a.updates)
+
+
 if __name__ == "__main__":
-    train(Config(name="default"))
+    main()

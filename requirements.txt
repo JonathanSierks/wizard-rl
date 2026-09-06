@@ -3,4 +3,4 @@ numpy
 termcolor
 tensorboard
 pytest
-ipykernel
+ipykernelmatplotlib
