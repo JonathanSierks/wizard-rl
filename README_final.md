@@ -13,16 +13,15 @@
 This project trains an agent to play **Wizard**, a trick-taking card game in which
 players must first *announce* how many tricks they will win and then play to hit
 that number exactly. Environment, observation encoding, training loop and
-diagnostics are implemented from scratch in PyTorch.
+diagnostics are implemented from scratch in Python and PyTorch.
 
-The agent learns to play competently and beats random opponents. Its **bidding
-policy, however, collapses**: within a few hundred updates it stops distinguishing
+The agent learns to play competently and beats random opponents. The main problem was, however, that the **bidding policy collapses**: within a few hundred updates it stopped distinguishing
 between hands and never announces more than 6 tricks in a 20-card round, where
-the structural expectation is 6.67. Most of this work concerns identifying why,
+the structural expectation is 6.67. Most of this work focused on identifying why and solving the problem,
 through **five training configurations of increasing complexity**, each one a
 response to a specific failure diagnosed in the previous. The final configuration
 removes the ceiling by replacing the learned bidding policy with a supervised
-trick-count predictor and an analytic decision rule.
+trick-count predictor and an analytic decision rule. This solved the bidding problem, yet the overall performance against the heuristic agent baseline leaves room for further improvement.
 
 **[▶ Play against the trained agent](#how-to-run)**
 
@@ -88,7 +87,7 @@ learned in one seat transfers to the others instead of being relearned per seat.
 
 ### Architecture
 
-A shared trunk (317 → 256 → 256, ReLU) with four linear heads:
+A shared trunk (317 → 256 → 256, ReLU) NN with four linear heads:
 
 | Head | Output | Objective |
 |---|---|---|
@@ -104,13 +103,13 @@ break the rules and spends no capacity learning them.
 
 REINFORCE with a learned value baseline (advantage actor-critic), Monte-Carlo
 returns, $\gamma = 1$. Three copies of the current network play each other. One
-update collects 20 games ≈ 13,800 transitions, of which ~1,200 are bids.
+update collects 20 games ≈ 13,800 transitions, of which ~1,200 are bids (later on this was increased to 30 games).
 
 Evaluation runs every 50 updates on a **fixed seed with the RNG state saved and
 restored**, so identical deals are replayed at every measurement point and
-differences are attributable to the network rather than to the cards. Two
-protocols: 200 games against random agents, 200 against a frozen earlier
-checkpoint. Section [Results](#results) shows why running both mattered.
+differences are attributable to the network rather than to the cards. Three
+protocols: 200 games against random agents, a frozen earlier
+checkpoint and a heuristic agent. Section [Results](#results) shows why running both mattered.
 
 ---
 
