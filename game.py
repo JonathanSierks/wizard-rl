@@ -7,10 +7,14 @@ from termcolor import colored
 from collections import Counter
 
 NUMBER_OF_ROUNDS = 20
-ROUND_WEIGHTS = [r**2 for r in range(1, NUMBER_OF_ROUNDS + 1)]
+ROUND_WEIGHTS_EXP = 2          # 0 = uniform, 2 = r**2 (favours large rounds)
 
-def sample_round_sizes(n=NUMBER_OF_ROUNDS):
-    return random.choices(range(1, NUMBER_OF_ROUNDS + 1), weights=ROUND_WEIGHTS, k=n)
+def round_weights(exp=ROUND_WEIGHTS_EXP):
+    return [r ** exp for r in range(1, NUMBER_OF_ROUNDS + 1)]
+
+def sample_round_sizes(n=NUMBER_OF_ROUNDS, weights_exp=ROUND_WEIGHTS_EXP):
+    return random.choices(range(1, NUMBER_OF_ROUNDS + 1),
+                          weights=round_weights(weights_exp), k=n)
 
 def determine_trump(deck, round_nr):
     if round_nr == NUMBER_OF_ROUNDS:
@@ -314,6 +318,6 @@ class Game:
         
         # 5) determine GAME WINNER
 
-    def start_sample(self):
-        self.start(sample_round_sizes())
+    def start_sample(self, weights_exp=ROUND_WEIGHTS_EXP):
+        self.start(sample_round_sizes(weights_exp=weights_exp))
         

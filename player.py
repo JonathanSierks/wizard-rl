@@ -65,10 +65,12 @@ def ev_bid(q, valid_bids):
     return best
 
 class RLAgent:
-    def __init__(self, net, greedy=False, debug=False):
+    def __init__(self, net, greedy=False, debug=False, bid_mode="ev"):
         self.net = net
         self.greedy = greedy
         self.debug = debug
+        self.bid_mode = bid_mode      # "ev" = analytic rule over the tricks head
+                                      # "policy" = sample the bid head, as in config A-D
         self.bid_logits_log = []
         self.bid_compare_log = []
         self.pending = []
@@ -84,17 +86,32 @@ class RLAgent:
         with torch.no_grad():
             raw_bid_logits, _, _, tricks_logits = self.net(x)          # [21], noch ohne -inf
 
+        mask = torch.zeros(raw_bid_logits.shape[0], dtype=torch.bool)
+        mask[valid_bids] = True
         q = torch.softmax(tricks_logits[:r+1], 0)
-        idx = ev_bid(q, valid_bids)
+
+        if self.bid_mode == "ev":
+            # Analytic rule: pick the bid with the highest expected score under
+            # the tricks head's distribution. Deterministic, no policy gradient.
+            idx = ev_bid(q, valid_bids)
+            pending_mask = None
+        else:
+            # The bid head is a policy, sampled and trained like the play head.
+            bid_logits = raw_bid_logits.masked_fill(~mask, float('-inf'))
+            if self.greedy:
+                idx = int(bid_logits.argmax())
+            else:
+                idx = int(torch.distributions.Categorical(logits=bid_logits).sample())
+            pending_mask = mask.numpy()
 
         if self.debug:
-            mask = torch.zeros(21, dtype=torch.bool)
-            mask[valid_bids] = True
             head_choice = int(raw_bid_logits.masked_fill(~mask, float('-inf')).argmax())
-            self.bid_compare_log.append((r, head_choice, idx, int(q.argmax())))
+            ev_choice = idx if self.bid_mode == "ev" else ev_bid(q, valid_bids)
+            self.bid_compare_log.append((r, head_choice, ev_choice, int(q.argmax())))
+            self.bid_logits_log.append((raw_bid_logits.clone(), r))
 
         if not self.greedy:
-            self.pending.append((enc, idx, None, "bid"))
+            self.pending.append((enc, idx, pending_mask, "bid"))
         return idx
     
     

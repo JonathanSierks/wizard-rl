@@ -8,32 +8,63 @@ import torch.nn.functional as F
 
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+from dataclasses import dataclass
 import os
 
 import random
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
-# --- run setup -------------------------------------------------------------
-SEED       = 0
-RUN_SUFFIX = "_ev_bidding_heuristic_baseline"
-UPDATES    = 50_000
 LOG_ROOT   = "/home/ipv577/rl_runs"
 CKPT_DIR   = "checkpoints"
-
-# --- architecture ----------------------------------------------------------
-OBS_DIM    = 60 + 60 + 180 + 5 + 9 + 3       # 317
-MAX_BID    = 20
-HIDDEN_DIM = 256
 OPP_CKPT   = "relevant_checkpoints/up_20260815_161453_6000.pt"
 
-# hyperparams
-BETA_BID = 0.05
-BETA_PLAY = 0.01
-LR = 3e-4
-G_SCALE = 50
-AUX = 0.1
-P_HEUR = 0.4
+
+@dataclass
+class Config:
+    """One experiment. The defaults reproduce the current behaviour exactly.
+
+    The five configurations of the ablation differ only in the four fields
+    marked below; everything else is held fixed so a difference in the result
+    is attributable to one axis.
+
+        A  bid_mode="policy"  use_value_baseline=False  round_weights_exp=0  aux=0.0
+        B  bid_mode="policy"  use_value_baseline=True   round_weights_exp=0  aux=0.0
+        C  bid_mode="policy"  use_value_baseline=True   round_weights_exp=2  aux=0.0
+        D  bid_mode="policy"  use_value_baseline=True   round_weights_exp=2  aux=0.1
+        E  bid_mode="ev"      use_value_baseline=True   round_weights_exp=2  aux=0.1
+    """
+    name: str = "default"
+
+    # --- the four ablation axes -------------------------------------------
+    bid_mode: str = "ev"               # "ev" | "policy"
+    use_value_baseline: bool = True    # False -> standardised return as baseline
+    round_weights_exp: int = 2         # 0 = uniform round sizes, 2 = r**2
+    aux: float = 0.1                   # weight of the tricks cross-entropy
+
+    # --- held fixed across the ablation -----------------------------------
+    beta_bid: float = 0.05
+    beta_play: float = 0.01
+    lr: float = 3e-4
+    g_scale: float = 50
+    p_heur: float = 0.4                # share of heuristic training opponents
+    games_per_update: int = 27
+    updates: int = 50_000
+    seed: int = 0
+
+    # --- architecture ------------------------------------------------------
+    obs_dim: int = 60 + 60 + 180 + 5 + 9 + 3       # 317
+    max_bid: int = 20
+    hidden_dim: int = 256
+
+    @property
+    def run_suffix(self):
+        return (f"_{self.name}_bid-{self.bid_mode}_vb-{int(self.use_value_baseline)}"
+                f"_rw-{self.round_weights_exp}_aux-{self.aux}_ph-{self.p_heur}")
+
+    def policy_heads(self):
+        """Heads that receive a policy gradient under this configuration."""
+        return {"play"} | ({"bid"} if self.bid_mode == "policy" else set())
 
 def rank_ratio(M):
     if M.shape[0] < 30:                  # zu wenige Zeilen → nicht aussagekräftig
@@ -42,7 +73,8 @@ def rank_ratio(M):
     s = torch.linalg.svdvals(M)
     return (s[0] / s.sum()).item()
 
-def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42, opponent=None):
+def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42,
+             opponent=None, bid_mode="ev"):
     """Score `net` against a table of two opponents.
 
     opponent="heuristic" -> the rule-based reference agent (fixed strength,
@@ -63,13 +95,14 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42, oppone
 
         with torch.no_grad():
             for _ in range(n_games):
-                rl = Player("rl1", 0, RLAgent(net, greedy=True, debug=collect))
+                rl = Player("rl1", 0, RLAgent(net, greedy=True, debug=collect,
+                                              bid_mode=bid_mode))
                 if opponent == "heuristic":
                     others = [Player("h1", 1, HeuristicAgent()),
                               Player("h2", 2, HeuristicAgent())]
                 elif net_opp is not None:
-                    others = [Player("o1", 1, RLAgent(net_opp, greedy=True)),
-                              Player("o2", 2, RLAgent(net_opp, greedy=True))]
+                    others = [Player("o1", 1, RLAgent(net_opp, greedy=True, bid_mode=bid_mode)),
+                              Player("o2", 2, RLAgent(net_opp, greedy=True, bid_mode=bid_mode))]
                 else:
                     others = [Player("r1", 1, RandomAgent()),
                               Player("r2", 2, RandomAgent())]
@@ -125,7 +158,7 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42, oppone
 # buffer = (enc, action, mask, head, G)             ; bids und alle aktionen mit G; einzelner buffer JE SPIELER; wächst in länge über Game
 # pending = (enc, idx, mask.numpy(), "bid"/"play")  ; aktionen einen runde (je SPIELER) ohne G; wächst in länge über Runde
 # batch = concatinierter buffer aller spieler; bei 3 spielern wäre das len(batch) = 690; eig. zu wenig für einen step; wir wollen lieber 10 - 20 games sammeln. update: machen wir jetzt; ein batch hält 20 * buffer (=20 games)
-def reinforce_loss(net, batch):
+def reinforce_loss(net, batch, cfg):
     """
     Buffer-Tupel:
         b[0]  enc         np.float32 (317,)   Observation zum Entscheidungszeitpunkt
@@ -136,11 +169,13 @@ def reinforce_loss(net, batch):
         b[5]  won_tricks  int                 tatsaechlich gewonnene Stiche (CE-Label)
         b[6]  round_nr    int                 Rundengroesse
 
-    Gebote entstehen seit dem Umbau aus der EV-Rechnung ueber den tricks_head,
-    nicht mehr aus einer gesampelten Policy. Bid-Transitions liefern deshalb
-    nur noch Value- und Tricks-Signal, keinen Policy-Gradienten.
+    Which heads get a policy gradient depends on cfg.bid_mode: with "policy"
+    both heads are trained as policies (configs A-D), with "ev" the bid comes
+    from the analytic rule and bid transitions carry only value and tricks
+    signal (config E).
     """
     losses, stats = [], {}
+    policy_heads = cfg.policy_heads()
 
     for head_name in ("bid", "play"):
         group = [b for b in batch if b[3] == head_name]
@@ -148,7 +183,7 @@ def reinforce_loss(net, batch):
             continue
 
         enc = torch.from_numpy(np.stack([b[0] for b in group]))
-        G   = torch.tensor([b[4] for b in group], dtype=torch.float32) / G_SCALE
+        G   = torch.tensor([b[4] for b in group], dtype=torch.float32) / cfg.g_scale
         won = torch.tensor([b[5] for b in group])                       # [B] long
         rs  = torch.tensor([b[6] for b in group])                       # [B]
 
@@ -164,34 +199,44 @@ def reinforce_loss(net, batch):
         # --- Value-Head --------------------------------------------------
         loss_value = (V - G).pow(2).mean()
 
-        # --- Policy-Gradient: nur fuer Kartenentscheidungen --------------
-        if head_name == "play":
+        # --- Policy-Gradient: fuer jeden Kopf, der unter cfg eine Policy ist --
+        terms = []
+        if head_name in policy_heads:
+            head_idx = 0 if head_name == "bid" else 1
+            beta     = cfg.beta_bid if head_name == "bid" else cfg.beta_play
+
             act = torch.tensor([b[1] for b in group])
             msk = torch.from_numpy(np.stack([b[2] for b in group])).bool()
-            logits = out[1].masked_fill(~msk, float('-inf'))
+            logits = out[head_idx].masked_fill(~msk, float('-inf'))
 
-            adv = G - V.detach()
+            # Without the learned baseline the standardised return is used
+            # instead -- that is the configuration A/B difference.
+            adv = (G - V.detach()) if cfg.use_value_baseline else G
             adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
             dist = torch.distributions.Categorical(logits=logits)
             loss_return  = -(dist.log_prob(act) * adv).mean()
-            loss_entropy = -BETA_PLAY * dist.entropy().mean()
-
-            losses.append(loss_return + loss_entropy + loss_value + AUX * loss_tricks)
+            loss_entropy = -beta * dist.entropy().mean()
+            terms += [loss_return, loss_entropy]
 
             real    = msk.sum(dim=1) > 1        # echte Wahl, kein Zwangszug
             n_legal = msk.sum(dim=1).float()
             ent     = dist.entropy()
 
-            stats["play_loss_return"]   = loss_return.item()
-            stats["play_loss_entropy"]  = loss_entropy.item()
-            stats["play_entropy"]       = ent.mean().item()
-            stats["play_entropy_real"]  = ent[real].mean().item()
-            stats["play_entropy_norm"]  = (ent[real] / n_legal[real].log()).mean().item()
-            stats["play_logit_absmax"]  = logits[real][msk[real]].abs().max().item()
-            stats["play_n_decisions"]   = real.sum().item()
-        else:
-            losses.append(loss_value + AUX * loss_tricks)
+            stats[f"{head_name}_loss_return"]  = loss_return.item()
+            stats[f"{head_name}_loss_entropy"] = loss_entropy.item()
+            stats[f"{head_name}_entropy"]      = ent.mean().item()
+            stats[f"{head_name}_entropy_real"] = ent[real].mean().item()
+            stats[f"{head_name}_entropy_norm"] = (ent[real] / n_legal[real].log()).mean().item()
+            stats[f"{head_name}_logit_absmax"] = logits[real][msk[real]].abs().max().item()
+            stats[f"{head_name}_n_decisions"]  = real.sum().item()
+
+        if cfg.use_value_baseline:
+            terms.append(loss_value)
+        if cfg.aux > 0:
+            terms.append(cfg.aux * loss_tricks)
+        if terms:
+            losses.append(sum(terms))
 
         # --- gemeinsame Statistik ----------------------------------------
         with torch.no_grad():
@@ -210,55 +255,64 @@ def reinforce_loss(net, batch):
 
     return torch.stack(losses).mean(), stats
 
-def train(updates=UPDATES, seed=SEED, run_suffix=RUN_SUFFIX):
-    """Run the training loop and return the trained network.
+def train(cfg=None, updates=None):
+    """Run one experiment and return the trained network.
 
     Everything that used to happen at import time lives here now, so the
     module can be imported (from a notebook, a test, an analysis script)
     without starting a run.
     """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    rng = random.Random(seed + 10_000)
+    cfg = cfg or Config()
+    updates = cfg.updates if updates is None else updates
+
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    rng = random.Random(cfg.seed + 10_000)
 
     run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = run_time + run_suffix
+    run_name = run_time + cfg.run_suffix
     writer = SummaryWriter(log_dir=f"{LOG_ROOT}/{run_name}")
     os.makedirs(CKPT_DIR, exist_ok=True)   # git cannot track the empty dir
 
-    net = WizNet(OBS_DIM, MAX_BID, HIDDEN_DIM)
-    net_opp = WizNet(OBS_DIM, MAX_BID, HIDDEN_DIM)
+    net = WizNet(cfg.obs_dim, cfg.max_bid, cfg.hidden_dim)
+    net_opp = WizNet(cfg.obs_dim, cfg.max_bid, cfg.hidden_dim)
     net_opp.load_state_dict(torch.load(OPP_CKPT), strict=False)
 
-    opt = torch.optim.Adam(net.parameters(), lr=LR)
+    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
 
     for update in range(updates):
 
-        # 27 games per update: with P_HEUR of the opponents being heuristics, only
+        # cfg.games_per_update: with cfg.p_heur of the opponents being heuristics, only
         # the RL agents contribute transitions, so more games are needed to keep the
         # batch at roughly the 13.800 transitions that 20 pure self-play games gave.
         batch = []
-        for _ in range(27):
-            others = [HeuristicAgent() if rng.random() < P_HEUR else RLAgent(net)
-                 for _ in range(2)]
-            rl = RLAgent(net)
+        for _ in range(cfg.games_per_update):
+            others = [HeuristicAgent() if rng.random() < cfg.p_heur
+                      else RLAgent(net, bid_mode=cfg.bid_mode)
+                      for _ in range(2)]
+            rl = RLAgent(net, bid_mode=cfg.bid_mode)
             agents = [rl] + others
         
             game = Game()
             for i, ag in enumerate(agents):
                 game.add_player(Player(f"p{i}", i, ag))
-            game.start_sample()
+            game.start_sample(cfg.round_weights_exp)
             for ag in agents:
                 if isinstance(ag, RLAgent):     # heuristics carry no transitions
                     batch.extend(ag.drain_buffer())
 
-        loss, stats = reinforce_loss(net, batch)
+        loss, stats = reinforce_loss(net, batch, cfg)
         opt.zero_grad()
         loss.backward()
 
-        for name, mod in (("play", net.card_head), ("value", net.value_head),
-                          ("tricks", net.tricks_head), ("trunk", net.layer2)):
+        heads = [("play", net.card_head), ("value", net.value_head),
+                 ("tricks", net.tricks_head), ("trunk", net.layer2)]
+        if cfg.bid_mode == "policy":
+            heads.append(("bid", net.bid_head))
+        for name, mod in heads:
+            if any(p.grad is None for p in mod.parameters()):
+                continue                      # head is inactive in this config
             g = torch.cat([p.grad.flatten() for p in mod.parameters()])
             writer.add_scalar(f"grad/{name}_norm", g.norm().item(), update)
 
@@ -275,32 +329,35 @@ def train(updates=UPDATES, seed=SEED, run_suffix=RUN_SUFFIX):
                 if k in stats:
                     writer.add_scalar(f"tricks/mae_r{r}_at_{h}", stats[k], update)
 
-        # --- Play-Policy: nur hier gibt es noch einen Policy-Gradienten ------
-        writer.add_scalar("loss/play_return",         stats["play_loss_return"],  update)
-        writer.add_scalar("loss/play_entropy",        stats["play_loss_entropy"], update)
-        writer.add_scalar("policy/play_entropy",      stats["play_entropy"],      update)
-        writer.add_scalar("policy/play_entropy_real", stats["play_entropy_real"], update)
-        writer.add_scalar("policy/play_entropy_norm", stats["play_entropy_norm"], update)
-        writer.add_scalar("policy/play_logit_absmax", stats["play_logit_absmax"], update)
-        writer.add_scalar("policy/play_n_decisions",  stats["play_n_decisions"],  update)
+        # --- Policy-Statistik, fuer jeden Kopf der unter cfg eine Policy ist --
+        for h in ("bid", "play"):
+            for key, tag in (("loss_return",  f"loss/{h}_return"),
+                             ("loss_entropy", f"loss/{h}_entropy"),
+                             ("entropy",      f"policy/{h}_entropy"),
+                             ("entropy_real", f"policy/{h}_entropy_real"),
+                             ("entropy_norm", f"policy/{h}_entropy_norm"),
+                             ("logit_absmax", f"policy/{h}_logit_absmax"),
+                             ("n_decisions",  f"policy/{h}_n_decisions")):
+                if f"{h}_{key}" in stats:
+                    writer.add_scalar(tag, stats[f"{h}_{key}"], update)
 
         # ====================================================================
         if update % 50 == 0:
             collect = (update % 250 == 0)
 
             if collect:
-                points, hits, metrics, bids20 = evaluate(net, n_games=1000, collect=True)
+                points, hits, metrics, bids20 = evaluate(net, n_games=1000, collect=True, bid_mode=cfg.bid_mode)
                 writer.add_histogram("bids/round20", bids20, update)
             else:
-                points, hits, metrics = evaluate(net)
+                points, hits, metrics = evaluate(net, bid_mode=cfg.bid_mode)
 
-            points_opp, hits_opp, metrics_opp = evaluate(net, net_opp)
+            points_opp, hits_opp, metrics_opp = evaluate(net, net_opp, bid_mode=cfg.bid_mode)
 
-            # Heuristics are now also training opponents (P_HEUR), so this score
+            # Heuristics are also training opponents when cfg.p_heur > 0, so this score
             # is no longer a clean generalisation measure -- score_vs_random is the
             # axis that is never trained against. Kept because it is deterministic
             # and therefore low-variance, hence fewer games.
-            points_heu, hits_heu, metrics_heu = evaluate(net, n_games=100, opponent="heuristic")
+            points_heu, hits_heu, metrics_heu = evaluate(net, n_games=100, opponent="heuristic", bid_mode=cfg.bid_mode)
 
             writer.add_scalar("eval/score_vs_random",         points, update)
             writer.add_scalar("eval/score_vs_rl",             points_opp, update)
@@ -329,4 +386,4 @@ def train(updates=UPDATES, seed=SEED, run_suffix=RUN_SUFFIX):
 
 
 if __name__ == "__main__":
-    train()
+    train(Config(name="default"))
