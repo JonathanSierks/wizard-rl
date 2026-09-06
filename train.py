@@ -50,7 +50,7 @@ class Config:
     beta_play: float = 0.01
     lr: float = 3e-4
     g_scale: float = 50
-    p_heur: float = 0.4                # share of heuristic training opponents
+    p_heur: float = 0                # share of heuristic training opponents
     games_per_update: int = 27
     updates: int = 50_000
     seed: int = 0
