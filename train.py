@@ -91,7 +91,7 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42,
         net_opp.eval()
 
     try:
-        totals, hits, rows, cmp_log = [], [], [], []
+        totals, hits, rows, cmp_log, logits_log = [], [], [], [], []
 
         with torch.no_grad():
             for g_i in range(n_games):
@@ -127,34 +127,51 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42,
                 rows.extend(rl.round_log)
                 if collect:
                     cmp_log.extend(rl.agent.bid_compare_log)
+                    logits_log.extend(rl.agent.bid_logits_log)
 
         metrics = {}
-        bids20  = torch.tensor([])
 
-        # --- Gebotsqualitaet pro Rundengroesse (misst die gespielten Gebote) ---
+        # --- Gebote und Gebotsqualitaet, aus den TATSAECHLICH gespielten -------
+        # Gebote in round_log. Unabhaengig davon, ob das Gebot aus einer Policy
+        # gesampelt oder aus der EV-Regel berechnet wurde -- deshalb ueber alle
+        # Konfigurationen der Ablation hinweg dieselbe Groesse.
         rr = torch.tensor([x[0] for x in rows])
         bd = torch.tensor([x[1] for x in rows])
         wn = torch.tensor([x[2] for x in rows])
         for size in (3, 8, 14, 20):
             m = rr == size
             if m.sum() == 0: continue
+            b = bd[m].float()
             d = (bd[m] - wn[m]).float()
+            metrics[f"bids/mean_r{size}"] = b.mean().item()
+            metrics[f"bids/max_r{size}"]  = b.max().item()
+            metrics[f"bids/std_r{size}"]  = b.std().item() if b.numel() > 1 else 0.0
             metrics[f"bias/mean_r{size}"] = d.mean().item()
             metrics[f"bias/mae_r{size}"]  = d.abs().mean().item()
             metrics[f"acc/r{size}"]       = (d == 0).float().mean().item()
 
-        # --- EV-Gebot vs. (ungenutzter) Bid-Head ---
+        bids20 = bd[rr == 20].float()
+
+        # --- Kollaps-Diagnostik: nur sinnvoll, solange der Bid-Head eine -------
+        # Policy IST. Im ev-Modus bekommt er keinen Gradienten mehr, der
+        # Rangquotient wuerde einen eingefrorenen Kopf messen.
+        if logits_log and bid_mode == "policy":
+            M = torch.stack([lg for lg, _ in logits_log])
+            rsizes = torch.tensor([r for _, r in logits_log])
+            metrics["rank/bid_all"] = rank_ratio(M)
+            for size in (5, 10, 20):
+                sel = rsizes == size
+                if sel.sum() > 0:
+                    metrics[f"rank/bid_r{size}"] = rank_ratio(M[sel])
+
+        # --- EV-Regel vs. Bid-Head: die Umschalt-Diagnose ---------------------
         if cmp_log:
             C = torch.tensor(cmp_log)          # [n, 4]: r, bid_head, ev, mode
-            bids20 = C[C[:, 0] == 20, 2]
             for size in (3, 8, 14, 20):
                 m = C[:, 0] == size
                 if m.sum() == 0: continue
-                metrics[f"bid_ev/mean_r{size}"]     = C[m, 2].float().mean().item()
-                metrics[f"bid_ev/max_r{size}"]      = C[m, 2].max().item()
-                metrics[f"bid_head/mean_r{size}"]   = C[m, 1].float().mean().item()
-                metrics[f"bid_head/max_r{size}"]    = C[m, 1].max().item()
-                metrics[f"bid_ev/agree_r{size}"]    = (C[m, 1] == C[m, 2]).float().mean().item()
+                metrics[f"bid_ev/mean_r{size}"]  = C[m, 2].float().mean().item()
+                metrics[f"bid_ev/agree_r{size}"] = (C[m, 1] == C[m, 2]).float().mean().item()
 
         score = sum(totals) / len(totals)
         if collect:
@@ -376,12 +393,11 @@ def train(cfg=None, updates=None):
             writer.add_scalar("eval/bid_accuracy_rl",         sum(hits_opp)/len(hits_opp), update)
             writer.add_scalar("eval/bid_accuracy_heuristic",  sum(hits_heu)/len(hits_heu), update)
 
+            # Full metric set only on the random axis. Bias and bid detail per
+            # round size against three opponent types was ~96 curves of which
+            # two thirds were never read; score and hit rate carry the rest.
             for k, v in metrics.items():
                 writer.add_scalar(f"{k}_random", v, update)
-            for k, v in metrics_opp.items():
-                writer.add_scalar(f"{k}_rl", v, update)
-            for k, v in metrics_heu.items():
-                writer.add_scalar(f"{k}_heuristic", v, update)
 
             writer.flush()
             print(f"up {update}: {points:.1f} Points & bid=won {sum(hits)/len(hits):.3f} [RANDOM]")
