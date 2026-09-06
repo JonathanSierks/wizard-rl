@@ -94,21 +94,31 @@ def evaluate(net, net_opp=None, n_games=200, collect=False, eval_seed=42,
         totals, hits, rows, cmp_log = [], [], [], []
 
         with torch.no_grad():
-            for _ in range(n_games):
-                rl = Player("rl1", 0, RLAgent(net, greedy=True, debug=collect,
-                                              bid_mode=bid_mode))
+            for g_i in range(n_games):
+                # Rotate the measured agent through all three seats. game.start()
+                # derives the first bidder from the round index, so seat 0 would
+                # otherwise be the "screw the dealer" player in EVERY round 20 --
+                # worth ~8 points of bid accuracy and biasing every r20 metric.
+                seat = g_i % 3
+                opp_seats = [i for i in range(3) if i != seat]
+
                 if opponent == "heuristic":
-                    others = [Player("h1", 1, HeuristicAgent()),
-                              Player("h2", 2, HeuristicAgent())]
+                    opp_agents = [HeuristicAgent(), HeuristicAgent()]
                 elif net_opp is not None:
-                    others = [Player("o1", 1, RLAgent(net_opp, greedy=True, bid_mode=bid_mode)),
-                              Player("o2", 2, RLAgent(net_opp, greedy=True, bid_mode=bid_mode))]
+                    opp_agents = [RLAgent(net_opp, greedy=True, bid_mode=bid_mode),
+                                  RLAgent(net_opp, greedy=True, bid_mode=bid_mode)]
                 else:
-                    others = [Player("r1", 1, RandomAgent()),
-                              Player("r2", 2, RandomAgent())]
+                    opp_agents = [RandomAgent(), RandomAgent()]
+
+                seats = [None, None, None]
+                rl = Player("rl1", seat, RLAgent(net, greedy=True, debug=collect,
+                                                 bid_mode=bid_mode))
+                seats[seat] = rl
+                for k, i in enumerate(opp_seats):
+                    seats[i] = Player(f"o{k+1}", i, opp_agents[k])
 
                 game = Game()
-                for p in [rl] + others:
+                for p in seats:
                     game.add_player(p)
                 game.start()
 
