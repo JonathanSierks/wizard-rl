@@ -433,7 +433,11 @@ def train(cfg=None, updates=None):
             print(f"up {update}: {points_heu:.1f} Points & bid=won {sum(hits_heu)/len(hits_heu):.3f} [HEURISTIC]")
 
         if update % 250 == 0:
-            torch.save(net.state_dict(), os.path.join(CKPT_DIR, f"up_{run_time}_{update}.pt"))
+            # cfg.name in the filename: run_time only has second resolution, so
+            # runs launched together in a loop would otherwise share a prefix and
+            # silently overwrite each other's checkpoints.
+            torch.save(net.state_dict(),
+                       os.path.join(CKPT_DIR, f"{cfg.name}_{run_time}_up{update}.pt"))
 
     writer.close()
     return net
