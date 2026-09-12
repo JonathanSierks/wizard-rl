@@ -107,208 +107,230 @@ update collects 20 games ≈ 13,800 transitions, of which ~1,200 are bids (later
 
 Evaluation runs every 50 updates on a **fixed seed with the RNG state saved and
 restored**, so identical deals are replayed at every measurement point and
-differences are attributable to the network rather than to the cards. Three
-protocols: 200 games against random agents, a frozen earlier
-checkpoint and a heuristic agent. Section [Results](#results) shows why running both mattered.
+differences are attributable to the network rather than to the cards. See section [Results](#results).
 
 ---
 
 ## Experiments
 
-Five configurations, each additive, each motivated by a failure diagnosed in the
-one before.
+Six configurations, each adding one mechanism to the previous one. Self-play
+score is points per game at a table of three copies of the same policy —
+directly comparable to the heuristic's 187.5, and the only axis no
+configuration can have trained towards.
 
-| | Configuration | Motivated by | Outcome |
+| | adds | motivated by | self-play |
 |---|---|---|---|
-| **A** | REINFORCE + per-head entropy bonus | — | Bids never exceed 5; logits grow without bound |
-| **B** | + learned value baseline | High return variance suspected as the cause | Variance reduced, collapse unchanged |
-| **C** | + `r²`-weighted round sampling | Diagnosis: too few bid samples per round size | Ceiling 5 → 6, collapse rate roughly halved |
-| **D** | + trick-count head as auxiliary loss | Shared trunk under-represents hand strength | Prediction error at bid time → 1.3 tricks |
-| **E** | + expected-value bidding rule | Reframe: the bid is a prediction problem, not a control problem | Ceiling removed (bids up to 10); calibration still off |
+| **0** | Heuristic baseline | — | **187.6** |
+| **A** | REINFORCE + per-head entropy bonus | — | 100.5 |
+| **B** | + learned value baseline | return variance suspected as the cause | 158.7 |
+| **C** | + `r²`-weighted round sampling | too few bid samples per round size | 178.7 |
+| **D** | + trick-count head as auxiliary loss | trunk under-represents hand strength | 137.0 |
+| **E** | + expected-value bidding rule | the bid is a prediction, not a control problem | **204.8** |
+| **F** | + heuristic opponents during training | self-play teaches one opponent distribution only | **220.6** |
 
-### A — REINFORCE baseline
+The bid ceiling in 20-card rounds is the thread running through A to D: none of
+them ever bids above 6, where the structural expectation is 6.67. C and D
+improve the machinery around a bid that still cannot be announced.
 
-The agent learns card play and reaches positive scores, but in 20-card rounds it
-never bids above 5. An entropy bonus — the standard response to premature
-determinism — was tried first. It held entropy roughly constant and made the
-ceiling **worse** (4 instead of 5) while slowing convergence: the symptom was
-treated, the mechanism untouched.
+### A — where the ceiling comes from
 
-Two diagnostics were built to characterise the failure. Collecting bid logits
-across many hands and taking the SVD of the column-centred matrix gives the
-**rank ratio** $s_0 / \sum s$ — the share of output variation living in a single
-direction. It rises from 0.26 to 0.77: three players holding entirely different
-hands produce near-identical logits, differing by roughly a scalar that tracks
-round size.
+Never bids above 6 in 20-card rounds; expectation is 6.67. Self-play 100.5.
 
-The second diagnostic is the **per-class logit standard deviation across hands**.
-It separates cleanly: classes 1–6 vary with the hand ($\sigma \approx 2$–$10$),
-classes 7–20 sit at $\sigma \approx 1.2$, the level of unlearned pass-through.
-The head bias is near-uniform across all 21 classes, so the upper classes are not
-being penalised — they are **frozen**. The reason is in the gradient itself. For a
-class that was not sampled,
+An unsampled class gets gradient $\partial L/\partial z_k = A \cdot p_k$,
+proportional to its own vanishing probability. But Adam divides by the gradient's
+running RMS, so the step stays at learning-rate scale: class 18 gets a gradient
+1700× smaller than class 5 and a step of the same size. The upper classes are not
+frozen, they random-walk on numerical noise — which is why the highest bid
+occasionally jumps to 18 for a few hundred updates and falls back.
 
-$$
-\frac{\partial L}{\partial z_k} = A \cdot p_k
-$$
-
-which is proportional to the class's *own* probability. Once
-$p(\text{bid } 7) \approx e^{-20}$, the gradient is numerically zero in both
-directions and no learning rate or entropy weight can bring the class back.
-
-![collapse](docs/figures/fig2_collapse.png)
+![collapse](figures/rank_ratio_and_spread_vs_random.png)
 
 ### B — Value baseline
 
-High Monte-Carlo return variance was the next hypothesis: round returns range
-from −200 to +220, dominated by card luck rather than decision quality. A value
-head replaces the batch-mean baseline with a state-conditional one,
-$A = G - V(s)$.
+Ceiling unchanged, but the biggest single gain in the ablation: self-play
+100.5 → 158.7, hit rate 0.330 → 0.374.
 
-It reduced variance and improved card play, but did not touch the ceiling —
-consistent with the frozen-class diagnosis, since a better baseline still cannot
-produce gradient for an action that is never sampled. The value head did confirm
-the pathology from another angle: it learns to predict a *negative* return for
-strong hands, which is correct under a policy that cannot bid high enough to use
-them.
+Round returns span −200 to +220, mostly card luck. A state-conditional baseline
+$A = G - V(s)$ removes that variance. It cannot help the ceiling — a better
+baseline still produces no gradient for an action that is never sampled.
 
 ### C — Weighted round sampling
 
-With ~1,200 bids per update spread across 20 round sizes, each size receives
-about 60 samples. And the bid classes are **absolute**: what is learned about
-bidding 1 in 3-card rounds does not transfer to bidding 7 in 20-card rounds.
+Ceiling still unchanged. Self-play 178.7.
 
-This was tested directly by training exclusively on rounds of 18+ cards. The
-ceiling disappeared immediately and bids landed in the 7–9 range, isolating
-**data availability** rather than optimisation as the binding constraint.
+Bid classes are absolute: bidding 1 in a 3-card round teaches nothing about
+bidding 7 in a 20-card round, and each round size gets only ~60 bids per update.
+Training exclusively on 18+ card rounds removes the ceiling immediately, so the
+constraint is data, not optimisation. But $r^2$ sampling gives round 20 just 2.8×
+more samples where that test had 20× — not enough to move it.
 
-Sampling round sizes $\propto r^2$ instead of cycling 1→20 raised the ceiling from
-5 to 6 and roughly halved the rate of logit growth — but $r^2$ gives round 20 only
-2.8× more samples where the isolating experiment had 20×. Small rounds were
-*not* degraded by the reweighting, contrary to expectation.
+![the ceiling](figures/highest_and_mean_bird_r20_random.png)
 
-![by round size](docs/figures/fig4_by_round_size.png)
+*A–D never leave the 5–6 band, E and F reach 11. The right panel is measured
+against random opponents — see [Results](#results) for why that matters.*
 
-### D and E — Reframing the bid as a prediction
+### D — trick prediction as an auxiliary task
 
-Policy gradient only ever learns about the action it took. But Wizard's scoring
-function is **known analytically** — so the only unknown is how many tricks a hand
-will take, and that is *observed every round, regardless of what was bid*.
+Prediction error at bid time 6.5 → 1.4 tricks. Self-play **drops** to 137.0.
 
-A fourth head predicts $p(w = k \mid s)$, trained by cross-entropy against the
-observed count. Its gradient carries no $p_k$ factor:
+The scoring rule is known analytically, so the only unknown is how many tricks a
+hand takes — and that is observed every round regardless of what was bid. A
+fourth head predicts $p(w = k \mid s)$ with gradient $q_k - \mathbb{1}[k=w]$: no
+$p_k$ factor, so an improbable but correct class gets the *largest* update. As a
+pure auxiliary loss it costs trunk capacity and the bid policy gains nothing.
+D is a regression that enables E.
 
-$$
-\frac{\partial L}{\partial z_k} = q_k - \mathbb{1}[k = w]
-$$
+### E — the bid becomes arithmetic
 
-so an improbable but correct class receives the *largest* update rather than
-none. The label is available for every transition in the round, not just the
-bidding one — about 13,800 training signals per update instead of 1,200.
+Ceiling gone: 39 % of round-20 bids land at 7+, against 0 % in A–D. Self-play
+**204.8**, above the heuristic's 187.5.
 
-In **D** this runs as an auxiliary loss while the policy head still decides. In
-**E** the bid becomes arithmetic: maximise expected points under the predicted
-distribution and the known scoring rule,
+With $q$ predicted and the scoring rule known, no policy is needed:
 
-$$
-\text{EV}(b) = q_b \,(20 + 10b) \;-\; 10 \sum_k q_k \,|b - k|
-$$
+$$\text{EV}(b) = q_b\,(20 + 10b) \;-\; 10\sum_k q_k\,|b - k|$$
 
-The rule can output a bid of 10 without ever having played one, because the class
-is *computed*, not learned.
+A bid of 10 can be output without ever having been played, because the class is
+computed. Calibration follows: at a table of three copies of itself the agent
+bids **6.67** against an expectation of 6.67.
 
-![ceiling](docs/figures/fig1_bid_ceiling.png)
+### F — opponent diversity
+
+Bias against the heuristic +1.15 → +0.20, bid quality at parity. Self-play
+**220.6**, best of the ablation.
+
+Self-play teaches the bid to condition on the opponents' announcements — a real
+signal, learned for exactly one opponent distribution. E therefore bids 5.7
+against random (who announce 10), 7.0 against copies of itself, and 7.3 against
+the under-bidding heuristic, losing that table with −82. Mixing heuristics into
+training at `p_heur = 0.4` widens the distribution. Not overfitting: self-play
+score, where no heuristic appears, is the highest in the grid.
+
+<p align="center">
+  <img src="figures/score_against_heuristic.png" width="600" alt="score against the heuristic">
+</p>
+
+*F trained against this opponent — valid for "beats the reference", not for
+"generalises".*
 
 ---
 
 ## Results
 
-> Numbers below are from single runs. A 5 × 3 ablation grid (configurations
-> A–E × three seeds) is in progress; see [Planned work](#planned-work).
+Three seeds per configuration, 3000 updates each. Error bars are the spread
+between seeds, not measurement error.
 
-| Config | Score vs. random | Bid accuracy | Bias @ r=20 | MAE @ r=20 | Max bid @ r=20 |
-|---|---|---|---|---|---|
-| A | | | | | |
-| B | | | | | |
-| C | | | | | |
-| D | | | | | |
-| E | | | | | |
+### Self-play — the primary axis
 
-*Bias* is mean(bid − tricks won): negative means systematic under-bidding.
-*MAE* separates precision from bias — an agent can be unbiased and imprecise.
+Three copies of one policy at one table, averaged over all three seats, 600
+games per seed. No foreign opponent takes part, so no configuration can have
+trained towards this number.
+
+| | points | seed spread | hit rate | MAE | individual seeds |
+|---|---:|---:|---:|---:|---|
+| **heuristic** | **187.5** | ±1.3 | 0.370 | 0.921 | *baseline* |
+| A | 100.5 | ±9.6 | 0.330 | 1.038 | 114 · 92 · 95 |
+| B | 158.7 | ±6.7 | 0.374 | 0.972 | 150 · 161 · 165 |
+| C | 178.8 | ±13.8 | 0.332 | 0.947 | 198 · 170 · 168 |
+| D | 137.0 | ±4.2 | 0.298 | 1.020 | 131 · 140 · 140 |
+| **E** | **204.8** | ±5.4 | 0.365 | 0.849 | 203 · 212 · 199 |
+| **F** | **220.6** | ±12.1 | 0.382 | **0.819** | 212 · 212 · 238 |
+
+E and F beat the baseline, every individual seed included. F matches the
+heuristic's hit rate (0.382 vs 0.370) at a smaller error (0.819 vs 0.921).
+
+<p align="center">
+  <img src="figures/scores_vs_self_play_all_configuration.png" width="600" alt="score against the heuristic">
+</p>
+
+### The other axes
+
+| | vs random | vs heuristic | tricks MAE @ r20 |
+|---|---:|---:|---:|
+| A | −36.3 ±12.8 | −45.9 ±20.2 | 3.49 ±1.0 |
+| B | −13.6 ±6.8 | 10.9 ±5.2 | 4.47 ±2.1 |
+| C | 20.0 ±12.9 | −58.0 ±20.6 | 6.47 ±3.3 |
+| D | −14.0 ±1.7 | −103.6 ±2.2 | 1.37 ±0.1 |
+| E | 41.3 ±16.4 | −56.7 ±14.0 | 1.35 ±0.0 |
+| F | 9.3 ±10.1 | 211.2 ±22.8 | 1.30 ±0.1 |
+
+F's score against the heuristic is not independent — it trained against that
+opponent with `p_heur = 0.4`. The number is valid for "beats the reference",
+not for "generalises to unseen opponents"; the self-play table answers the
+latter.
+
 
 ### The evaluation opponent determines the conclusion
 
-The single most consequential finding was not about the agent but about how it
-was measured.
+The most consequential finding was not about the agent but about how it was
+measured.
 
-![opponent dependence](docs/figures/fig3_opponent_dependence.png)
+| measured against | opponents bid | agent bids | agent wins | bias |
+|---|---:|---:|---:|---:|
+| 2× random | 10.20 | 5.20 | 6.97 | −1.77 |
+| 2× heuristic | 5.35 | 7.00 | 6.89 | +0.10 |
+| **2× copies of itself** | 6.63 | **6.67** | 6.71 | **−0.05** |
 
-Same checkpoints, two evaluation protocols, opposite stories. Against the frozen
-opponent, score climbs monotonically to +236 per game and bid calibration at
-*r* = 20 **improves** from −1.36 to −0.69. Against random opponents, score peaks
-near update 2,000 and returns to zero while calibration **degrades** from −1.21 to
-−3.17.
+`RandomAgent` bids uniformly over 0..r, so in round 20 each opponent announces
+about 10 of the 20 available tricks. The agent reads those bids from its
+observation and correctly concludes little is left for it. Broken down by
+bidding position: 6.78 as first bidder, 5.39 as second, 3.45 as last — the
+effect appears exactly as the opponents' bids enter the observation.
 
-Both measurements are correct. The agent has converged to bidding low and
-avoiding tricks, and whether that is well calibrated depends on how aggressively
-the opponents compete — the $r$ tricks in a round get distributed either way. The
-frozen opponent bids around 6.5 and competes for them; random agents do not.
+For a year of curves, `bids/mean_r20` on the random axis therefore looked like a
+calibration failure. The same network bids the structural expectation to two
+decimals against copies of itself. What it had learned was not a bad bid but a
+correct inference from a nonsensical input.
 
-The frozen opponent never appears in training, so this is not opponent-specific
-learning. It is a measurement artefact: the metric increasingly reflects the
-*opponent's* weakness rather than the agent's strength. Read `score_vs_rl` alone
-and this project looks like a success story.
+A second measurement artefact sat in the same place. `game.start()` derives the
+first bidder from the round index, so in round 20 the bidding order is always
+[1, 2, 0] and seat 0 is always the player the screw-the-dealer rule restricts.
+Three identical heuristics over 500 games: hit rate 0.260 on seat 0 against
+0.342 on seat 2. Every round-20 figure in earlier versions of this document
+carried that penalty.
 
-### What the trick-count head fixed, and what it did not
+<p align="center">
+  <img src="figures/score_against_heuristic.png" width="45%">
+  <img src="figures/score_vs_random.png" width="45%">
+</p>
 
-![tricks head](docs/figures/fig5_tricks_head.png)
+## What the agent learned
 
-Prediction error at bid time falls to ~1.3 tricks and the bid ceiling disappears.
-Calibration does not follow: the agent still under-bids by ~2 tricks in large
-rounds, because the labels come from its own conservative play. The play head
-observes the announced bid and plays toward it, so the training target depends on
-the decision being evaluated — a confound the current design does not resolve.
+Three probes of the trained network, none of which involve a score.
+
+**Card values.** The agent learns what a card is worth, and the values respond to trump exactly as they should. Value rises with rank. Under `trump = blue` the blue cards sit clearly above the rest; under `trump = none` all four suits collapse onto the same level. Wizards are always highest, fools always lowest. None of this is in the training signal — the agent only ever sees the round's final score.
+<p align="center">
+  <img src="figures/card_value_blue.png" width="45%">
+  <img src="figures/card_value_none.png" width="45%">
+</p>
+
+**Opponent-conditioned bidding.** Already shown in the tables above: the bid shifts in the right direction with the opponents' announcements — up against the under-bidding heuristic, down against random. The mechanism is learned from self-play and transfers correctly only to opponents that bid similarly.
 
 ---
 
 ## Lessons learned
 
-- **Aggregate metrics hide selective failure.** Overall bid accuracy sat near 0.28
-  throughout while small rounds were near-optimal and large rounds degraded
-  steadily. Only the decomposition by round size showed either.
+- **The evaluation opponent decides the conclusion.** Random opponents bid ~10 in
+  round 20, so the agent correctly bids down — and looked miscalibrated for
+  thousands of updates. Against copies of itself it hits the structural
+  expectation exactly.
 - **A collapsed action class is a gradient-flow problem, not a hyperparameter
-  one.** This ruled out an entire class of interventions: no search over learning
-  rate or entropy weight can revive a class whose gradient is proportional to its
-  own vanishing probability.
-- **Choose the evaluation opponent deliberately.** Two honest metrics disagreed
-  about the same checkpoints for 10,000 updates.
-- **One change per run.** The one time three things changed together, the run was
-  uninterpretable and had to be repeated.
-- **Verify what the analysis code measures.** One finding reported here was later
-  retracted: an analysis concluding the agent ignored trump suit had been run
-  against a *reconstructed* copy of the encoder rather than the project's own
-  `encode()`. Re-run correctly, the trump effect was clearly present. The wrong
-  conclusion had stood for two days and had already informed planned changes.
-- **Probe the frozen model.** Synthetic-hand queries, linear probes on the trunk
-  and gradient attribution over the 60 card inputs located blind spots that no
-  training curve indicated.
+  one.** No learning rate or entropy weight revives a class whose gradient is
+  proportional to its own vanishing probability — but under Adam it is not frozen
+  either, it drifts at full learning rate on noise.
+- **Probe the frozen model.** Synthetic hands, linear probes and gradient
+  attribution over the 60 card inputs found blind spots no training curve showed.
 
 ## Planned work
 
-- **5 × 3 ablation grid**, configurations A–E over three seeds, run in parallel,
-  to attach confidence intervals to the table above. Two runs of an identical
-  configuration once differed by 40 points, so effects below that are currently
-  not measurable.
-- **An opponent pool** sampled from checkpoints across training, replacing the
-  single frozen reference.
-- **$p(w \mid s, b)$ instead of $p(w \mid s)$** — conditioning the predictor on the
-  bid and marginalising at decision time, to remove the confound above.
-- **Permutation-invariant opponent encoding** (DeepSets / attention) for parameter
-  sharing across opponents and variable player counts.
-- **Card embeddings.** "Red 9 in hand" and "red 9 in the current trick" are
-  currently unrelated input dimensions.
-
+- **Splitting the remaining gap.** Hybrid agents, RL bidding with heuristic
+  play and vice versa, to attribute what is still missing to the bid or to the
+  card play. Bid quality is already at parity (corr 0.884 vs 0.881); the fine
+  control that turns "near the bid" into "exactly the bid" is not.
+- **Denser play signal.** One scalar reward per round over up to 20 card
+  decisions cannot teach "win exactly one more trick". A per-trick auxiliary
+  loss, or a penalty for tricks taken beyond the announced bid.
+- **Round-robin among the 18 checkpoints.** No configuration trained against
+  another, so every pairing is an unseen opponent.
 ---
 
 ## Repository Structure
@@ -334,7 +356,10 @@ wizard-rl/
 └── README.md
 ```
 
-## Installation
+
+## How to Run
+
+### Install
 
 ```bash
 git clone https://github.com/JonathanSierks/wizard-rl.git
@@ -343,23 +368,20 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## How to Run
-
 ### Play against the agent
 
 ```bash
 python main.py
 ```
 
-Deals a full game against two copies of the trained agent. Your hand is shown
-with card indices; you enter a bid and then an index per trick. Illegal choices
+Deals a full game against two copies of the trained agent from configuration F. Your hand is shown with card indices; you enter a bid and then an index per trick. Illegal choices
 are rejected with the reason.
 
 ### Train from scratch
 
 ```bash
 python train.py
-tensorboard --logdir rl_runs
+tensorboard --logdir rl_runs --port 6006
 ```
 
 | Flag | Default | Purpose |
