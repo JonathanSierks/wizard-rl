@@ -1,10 +1,12 @@
-from dataclasses import dataclass
-from cards import CardDeck, Card
-from tricks import Trick, legal_cards, resolve_winner
 import random
-from observations import BidObservation, PlayObservation
+from dataclasses import dataclass
 from termcolor import colored
 from collections import Counter
+
+from cards import CardDeck, Card
+from tricks import Trick, legal_cards, resolve_winner
+from observations import BidObservation, PlayObservation
+from player import HumanAgent
 
 NUMBER_OF_ROUNDS = 20
 ROUND_WEIGHTS_EXP = 2          # 0 = uniform, 2 = r**2 (favours large rounds)
@@ -189,7 +191,7 @@ class Game:
             #    print(f"Spieler {p.id} hat {p.points}")
 
 
-    def start_verbose(self, round_sizes=None):
+    def start_verbose(self, round_sizes=None, show_all_hands=False):
         if round_sizes is None:
             round_sizes = range(1, self.number_of_rounds +1)
 
@@ -212,10 +214,11 @@ class Game:
 
             trump = determine_trump(deck, round_nr)
 
-            # --- HAND + TRUMP ausgeben ---
+            # --- return HAND + TRUMP ---
             for player in self.players:
-                hand_str = ", ".join(colored(str(c.value), c.color) for c in player.hand)
-                print(f"HAND of {player.name}: {hand_str}")
+                if show_all_hands or isinstance(player.agent, HumanAgent):
+                    hand_str = ", ".join(colored(str(c.value), c.color) for c in player.hand)
+                    print(f"HAND of {player.name}: {hand_str}")
             trump_str = "None" if trump == "none" else colored(trump, trump)
             print(f"Trump: {trump_str}")
             print("\n")
