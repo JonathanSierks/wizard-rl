@@ -8,7 +8,7 @@
 ![NumPy](https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white)
 ![pytest](https://img.shields.io/badge/pytest-0A9EDC?logo=pytest&logoColor=white)
 
-# Self-Play Reinforcement Learning for Wizard — Diagnosing a Policy Collapse
+# Self-Play Reinforcement Learning for Wizard
 
 This project trains an agent to play **Wizard**, a trick-taking card game in which
 players must first *announce* how many tricks they will win and then play to hit
